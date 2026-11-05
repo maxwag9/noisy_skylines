@@ -1,0 +1,19 @@
+name: "Continental Bytecode Demo"
+
+noises:
+  continents:
+    seed: 1741
+    frequency: 0.0050
+    octaves: 5
+    lacunarity: 2.0
+    gain: 0.50
+
+  mountains:
+    seed: 8197
+    frequency: 0.0180
+    octaves: 4
+    lacunarity: 2.05
+    gain: 0.48
+
+outputs:
+  height: "fbm(continents, x, z) * 1.10 + (ridge(fbm(mountains, x, z)) - 0.72) * 0.48"
