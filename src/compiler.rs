@@ -1099,6 +1099,7 @@ pub struct Avx512Workspace {
     registers: Vec<__m512>,
     scalar: ScalarWorkspace,
 }
+#[derive(Clone, Debug)]
 pub struct ScalarWorkspaceF64 {
     registers: Vec<f64>,
 }
@@ -1423,8 +1424,7 @@ impl F32GenWorkspace {
     }
 }
 
-
-
+#[derive(Clone, Debug)]
 pub struct GenWorkspace {
     f32: F32GenWorkspace,
     dvec2_f32: ScalarWorkspace,
