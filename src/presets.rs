@@ -5,6 +5,7 @@ use serde::Deserialize;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::path::Path;
+use glam::{DVec2, Vec2};
 
 #[derive(Deserialize)]
 pub struct PresetFile {
@@ -54,11 +55,20 @@ impl Default for PresetFile {
 }
 #[derive(Deserialize)]
 pub struct NoiseDefinition {
-    seed: i32,
-    frequency: f32,
-    octaves: usize,
-    lacunarity: f32,
-    gain: f32,
+    pub seed: i32,
+    pub frequency: f64,
+    pub octaves: usize,
+    pub lacunarity: f64,
+    pub gain: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct NoiseConfig {
+    pub seed: i32,
+    pub frequency: f64,
+    pub octaves: usize,
+    pub lacunarity: f64,
+    pub gain: f64,
 }
 
 #[derive(Clone)]
@@ -213,14 +223,6 @@ pub fn compile_preset_file_default(parsed: PresetFile) -> CompiledPreset {
         expression,
     }
 }
-#[derive(Clone, Debug)]
-pub struct NoiseConfig {
-    pub seed: i32,
-    pub frequency: f32,
-    pub octaves: usize,
-    pub lacunarity: f32,
-    pub gain: f32,
-}
 
 const GRADIENT_X: [f32; 8] = [1.0, -1.0, 0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2];
 const GRADIENT_Z: [f32; 8] = [0.0, 0.0, 1.0, -1.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2];
@@ -254,37 +256,57 @@ fn gradient_dot(ix: i32, iz: i32, dx: f32, dz: f32, seed: i32) -> f32 {
 }
 
 #[inline]
-pub fn noise2d(x: f32, z: f32, seed: i32) -> f32 {
-    let floor_x = x.floor();
-    let floor_z = z.floor();
+pub fn noise2d(point: Vec2, seed: i32) -> f32 {
+    let floor_x = point.x.floor();
+    let floor_z = point.y.floor();
+
     let ix = floor_x as i32;
     let iz = floor_z as i32;
-    let fx = x - floor_x;
-    let fz = z - floor_z;
+
+    let fx = point.x - floor_x;
+    let fz = point.y - floor_z;
 
     let n00 = gradient_dot(ix, iz, fx, fz, seed);
     let n10 = gradient_dot(ix.wrapping_add(1), iz, fx - 1.0, fz, seed);
     let n01 = gradient_dot(ix, iz.wrapping_add(1), fx, fz - 1.0, seed);
-    let n11 = gradient_dot(ix.wrapping_add(1), iz.wrapping_add(1), fx - 1.0, fz - 1.0, seed);
+    let n11 = gradient_dot(
+        ix.wrapping_add(1),
+        iz.wrapping_add(1),
+        fx - 1.0,
+        fz - 1.0,
+        seed,
+    );
 
     let u = fade(fx);
     let v = fade(fz);
-    lerp(lerp(n00, n10, u), lerp(n01, n11, u), v) * NOISE_SCALE
+
+    lerp(
+        lerp(n00, n10, u),
+        lerp(n01, n11, u),
+        v,
+    ) * NOISE_SCALE
 }
 
 #[inline]
-pub fn fbm_scalar(config: &NoiseConfig, x: f32, z: f32) -> f32 {
-    let mut frequency = config.frequency;
+pub fn fbm_scalar(config: &NoiseConfig, point: Vec2) -> f32 {
+    let mut frequency = config.frequency as f32;
+    let lacunarity = config.lacunarity as f32;
+    let gain = config.gain as f32;
+
     let mut amplitude = 1.0_f32;
     let mut amplitude_sum = 0.0_f32;
     let mut value = 0.0_f32;
 
     for octave in 0..config.octaves {
-        let seed = config.seed.wrapping_add((octave as i32).wrapping_mul(1013));
-        value += noise2d(x * frequency, z * frequency, seed) * amplitude;
+        let seed = config.seed.wrapping_add(
+            (octave as i32).wrapping_mul(1013),
+        );
+
+        value += noise2d(point * frequency, seed) * amplitude;
+
         amplitude_sum += amplitude;
-        frequency *= config.lacunarity;
-        amplitude *= config.gain;
+        frequency *= lacunarity;
+        amplitude *= gain;
     }
 
     if amplitude_sum > 0.0 {
@@ -406,7 +428,10 @@ pub unsafe fn noise2d_avx2(x: __m256, z: __m256, seed: i32) -> __m256 { unsafe {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn fbm_avx2(config: &NoiseConfig, x: __m256, z: __m256) -> __m256 { unsafe {
-    let mut frequency = config.frequency;
+    let mut frequency = config.frequency as f32;
+    let lacunarity = config.lacunarity as f32;
+    let gain = config.gain as f32;
+
     let mut amplitude = 1.0_f32;
     let mut amplitude_sum = 0.0_f32;
     let mut value = _mm256_setzero_ps();
@@ -421,8 +446,8 @@ pub unsafe fn fbm_avx2(config: &NoiseConfig, x: __m256, z: __m256) -> __m256 { u
             _mm256_mul_ps(octave_value, _mm256_set1_ps(amplitude)),
         );
         amplitude_sum += amplitude;
-        frequency *= config.lacunarity;
-        amplitude *= config.gain;
+        frequency *= lacunarity;
+        amplitude *= gain;
     }
 
     if amplitude_sum > 0.0 {
@@ -490,7 +515,10 @@ pub unsafe fn fbm_scalar_fma(
     x: f32,
     z: f32,
 ) -> f32 {
-    let mut frequency = config.frequency;
+    let mut frequency = config.frequency as f32;
+    let lacunarity = config.lacunarity as f32;
+    let gain = config.gain as f32;
+
     let mut amplitude = 1.0_f32;
     let mut amplitude_sum = 0.0_f32;
     let mut value = 0.0_f32;
@@ -501,8 +529,8 @@ pub unsafe fn fbm_scalar_fma(
             .mul_add(amplitude, value);
 
         amplitude_sum += amplitude;
-        frequency *= config.lacunarity;
-        amplitude *= config.gain;
+        frequency *= lacunarity;
+        amplitude *= gain;
     }
 
     if amplitude_sum > 0.0 {
@@ -623,7 +651,10 @@ pub unsafe fn fbm_avx2_fma(
     z: __m256,
 ) -> __m256 {
     unsafe {
-        let mut frequency = config.frequency;
+        let mut frequency = config.frequency as f32;
+        let lacunarity = config.lacunarity as f32;
+        let gain = config.gain as f32;
+
         let mut amplitude = 1.0_f32;
         let mut amplitude_sum = 0.0_f32;
         let mut value = _mm256_setzero_ps();
@@ -643,8 +674,8 @@ pub unsafe fn fbm_avx2_fma(
             );
 
             amplitude_sum += amplitude;
-            frequency *= config.lacunarity;
-            amplitude *= config.gain;
+            frequency *= lacunarity;
+            amplitude *= gain;
         }
 
         if amplitude_sum > 0.0 {
@@ -802,7 +833,10 @@ pub unsafe fn fbm_avx512_fma(
     z: __m512,
 ) -> __m512 {
     unsafe {
-        let mut frequency = config.frequency;
+        let mut frequency = config.frequency as f32;
+        let lacunarity = config.lacunarity as f32;
+        let gain = config.gain as f32;
+
         let mut amplitude = 1.0_f32;
         let mut amplitude_sum = 0.0_f32;
         let mut value = _mm512_setzero_ps();
@@ -822,8 +856,8 @@ pub unsafe fn fbm_avx512_fma(
             );
 
             amplitude_sum += amplitude;
-            frequency *= config.lacunarity;
-            amplitude *= config.gain;
+            frequency *= lacunarity;
+            amplitude *= gain;
         }
 
         if amplitude_sum > 0.0 {
@@ -834,4 +868,257 @@ pub unsafe fn fbm_avx512_fma(
     }
 }
 
+const GRADIENT_X_F64: [f64; 8] = [
+    1.0,
+    -1.0,
+    0.0,
+    0.0,
+    std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+    std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+];
 
+const GRADIENT_Z_F64: [f64; 8] = [
+    0.0,
+    0.0,
+    1.0,
+    -1.0,
+    std::f64::consts::FRAC_1_SQRT_2,
+    std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+    -std::f64::consts::FRAC_1_SQRT_2,
+];
+
+const NOISE_SCALE_F64: f64 = std::f64::consts::SQRT_2;
+
+#[inline]
+fn hash2_i64(x: i64, z: i64, seed: i32) -> u32 {
+    if let (Ok(x32), Ok(z32)) = (i32::try_from(x), i32::try_from(z)) {
+        return hash2(x32, z32, seed);
+    }
+
+    let mut h = (x as u64).wrapping_mul(0x9E37_79B1_85EB_CA87)
+        ^ (z as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (seed as u32 as u64);
+
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+
+    h ^= h >> 31;
+
+    (h as u32) ^ (h >> 32) as u32
+}
+
+#[inline]
+fn split_cell(value: f64) -> Option<(i64, f64)> {
+    const I64_LIMIT: f64 = i64::MAX as f64;
+
+    if !value.is_finite() {
+        return None;
+    }
+
+    let floor = value.floor();
+
+    if floor < -I64_LIMIT || floor >= I64_LIMIT {
+        return None;
+    }
+
+    Some((floor as i64, value - floor))
+}
+
+#[inline]
+fn fade_f64(t: f64) -> f64 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+#[inline]
+fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
+    a + t * (b - a)
+}
+
+#[inline]
+fn gradient_dot_i64_f64(
+    ix: i64,
+    iz: i64,
+    dx: f64,
+    dz: f64,
+    seed: i32,
+) -> f64 {
+    let index = (hash2_i64(ix, iz, seed) & 7) as usize;
+
+    GRADIENT_X_F64[index] * dx
+        + GRADIENT_Z_F64[index] * dz
+}
+
+#[inline]
+fn noise2d_dvec2_f64(point: DVec2, seed: i32) -> Option<f64> {
+    let (ix, fx) = split_cell(point.x)?;
+    let (iz, fz) = split_cell(point.y)?;
+
+    let n00 = gradient_dot_i64_f64(ix, iz, fx, fz, seed);
+
+    let n10 = gradient_dot_i64_f64(
+        ix.wrapping_add(1),
+        iz,
+        fx - 1.0,
+        fz,
+        seed,
+    );
+
+    let n01 = gradient_dot_i64_f64(
+        ix,
+        iz.wrapping_add(1),
+        fx,
+        fz - 1.0,
+        seed,
+    );
+
+    let n11 = gradient_dot_i64_f64(
+        ix.wrapping_add(1),
+        iz.wrapping_add(1),
+        fx - 1.0,
+        fz - 1.0,
+        seed,
+    );
+
+    let u = fade_f64(fx);
+    let v = fade_f64(fz);
+
+    Some(
+        lerp_f64(
+            lerp_f64(n00, n10, u),
+            lerp_f64(n01, n11, u),
+            v,
+        ) * NOISE_SCALE_F64,
+    )
+}
+
+pub fn fbm_f64(config: &NoiseConfig, point: DVec2) -> Option<f64> {
+    let mut frequency = config.frequency;
+    let mut amplitude = 1.0_f64;
+    let mut amplitude_sum = 0.0_f64;
+    let mut value = 0.0_f64;
+
+    for octave in 0..config.octaves {
+        let seed = config.seed.wrapping_add(
+            (octave as i32).wrapping_mul(1013),
+        );
+
+        let sample = DVec2::new(
+            point.x * frequency,
+            point.y * frequency,
+        );
+
+        value += noise2d_dvec2_f64(sample, seed)? * amplitude;
+
+        amplitude_sum += amplitude;
+        frequency *= config.lacunarity;
+        amplitude *= config.gain;
+    }
+
+    Some(if amplitude_sum > 0.0 {
+        value / amplitude_sum
+    } else {
+        0.0
+    })
+}
+
+#[inline]
+fn gradient_dot_i64_f32(
+    ix: i64,
+    iz: i64,
+    dx: f32,
+    dz: f32,
+    seed: i32,
+) -> f32 {
+    let index = (hash2_i64(ix, iz, seed) & 7) as usize;
+
+    GRADIENT_X[index] * dx
+        + GRADIENT_Z[index] * dz
+}
+
+#[inline]
+fn noise2d_dvec2_f32(point: DVec2, seed: i32) -> Option<f32> {
+    let (ix, fx64) = split_cell(point.x)?;
+    let (iz, fz64) = split_cell(point.y)?;
+
+    let fx = fx64 as f32;
+    let fz = fz64 as f32;
+
+    let n00 = gradient_dot_i64_f32(ix, iz, fx, fz, seed);
+
+    let n10 = gradient_dot_i64_f32(
+        ix.wrapping_add(1),
+        iz,
+        fx - 1.0,
+        fz,
+        seed,
+    );
+
+    let n01 = gradient_dot_i64_f32(
+        ix,
+        iz.wrapping_add(1),
+        fx,
+        fz - 1.0,
+        seed,
+    );
+
+    let n11 = gradient_dot_i64_f32(
+        ix.wrapping_add(1),
+        iz.wrapping_add(1),
+        fx - 1.0,
+        fz - 1.0,
+        seed,
+    );
+
+    let u = fade(fx);
+    let v = fade(fz);
+
+    Some(
+        lerp(
+            lerp(n00, n10, u),
+            lerp(n01, n11, u),
+            v,
+        ) * NOISE_SCALE,
+    )
+}
+
+pub fn fbm_dvec2_f32(
+    config: &NoiseConfig,
+    point: DVec2,
+) -> Option<f32> {
+    let mut frequency = config.frequency;
+    let lacunarity = config.lacunarity;
+    let gain = config.gain as f32;
+
+    let mut amplitude = 1.0_f32;
+    let mut amplitude_sum = 0.0_f32;
+    let mut value = 0.0_f32;
+
+    for octave in 0..config.octaves {
+        let seed = config.seed.wrapping_add(
+            (octave as i32).wrapping_mul(1013),
+        );
+
+        let sample = DVec2::new(
+            point.x * frequency,
+            point.y * frequency,
+        );
+
+        value += noise2d_dvec2_f32(sample, seed)? * amplitude;
+
+        amplitude_sum += amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    Some(if amplitude_sum > 0.0 {
+        value / amplitude_sum
+    } else {
+        0.0
+    })
+}

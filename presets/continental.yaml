@@ -16,4 +16,4 @@ noises:
     gain: 0.48
 
 outputs:
-  height: "fbm(continents, x, z) * 1.10 + (ridge(fbm(mountains, x, z)) - 0.72) * 0.48"
+  height: "fbm(continents) * 1.10 + (ridge(fbm(mountains)) - 0.72) * 0.48"
