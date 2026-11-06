@@ -43,7 +43,7 @@ impl Default for PresetFile {
 
         outputs.insert(
             "height".to_owned(),
-            "fbm(continents, x, z) * 1.10 + (ridge(fbm(mountains, x, z)) - 0.72) * 0.48".to_owned(),
+            "fbm(continents) * 1.10 + (ridge(fbm(mountains)) - 0.72) * 0.48".to_owned(),
         );
 
         Self {

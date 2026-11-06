@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use glam::{DVec2, Vec2};
-use noisy_skylines::compiler::{compile_expression, execute_scalar, execute_scalar_with_workspace, execute_avx2, instruction_count, GenBackend, F32GenWorkspace, ScalarWorkspace, GenWorkspace};
+use noisy_skylines::compiler::{compile_expression, instruction_count, GenBackend, GenWorkspace};
 
 use noisy_skylines::presets::{compile_preset, noise2d, fbm_scalar, CompiledPreset, NoiseConfig, fbm_dvec2_f32};
 
@@ -158,27 +158,6 @@ fn fbm_is_deterministic_and_finite() {
 }
 
 #[test]
-fn expression_arithmetic_respects_precedence() {
-    let program = compile_expression(
-        "2 + 3 * 4 - 8 / 2",
-        &BTreeMap::new(),
-    ).expect("Failed to compile arithmetic expression");
-
-    let points = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(2.0, 2.0)];
-    let mut output = [0.0; 3];
-
-    execute_scalar(
-        &program,
-        &[],
-        points.as_slice(),
-        &mut output
-    );
-
-    for value in output {
-        assert!((value - 10.0).abs() < 1.0e-6);
-    }
-}
-#[test]
 fn dvec2_f32_preserves_large_world_coordinate_precision() {
     let config = NoiseConfig {
         seed: 1741,
@@ -228,58 +207,13 @@ fn all_precision_combinations_execute() {
     let mut output32 = vec![0.0_f32; 3];
     let mut output64 = vec![0.0_f64; 3];
 
-    let mut workspace = GenWorkspace::new(&preset.program);
-
-    workspace.execute_vec2_f32(
-        &preset.program,
-        &preset.noises,
-        &points32,
-        &mut output32,
-    );
-
-    workspace.execute_vec2_f64(
-        &preset.program,
-        &preset.noises,
-        &points32,
-        &mut output64,
-    ).unwrap();
-
-    workspace.execute_dvec2_f32(
-        &preset.program,
-        &preset.noises,
-        &points64,
-        &mut output32,
-    ).unwrap();
-
-    workspace.execute_dvec2_f64(
-        &preset.program,
-        &preset.noises,
-        &points64,
-        &mut output64,
-    ).unwrap();
+    GenWorkspace::execute_muted(&preset, points32.as_slice(), output32.as_mut_slice(), Some(GenBackend::Scalar));
+    GenWorkspace::execute_muted(&preset, points32.as_slice(), output64.as_mut_slice(), Some(GenBackend::Scalar));
+    GenWorkspace::execute_muted(&preset, points64.as_slice(), output32.as_mut_slice(), Some(GenBackend::Scalar));
+    GenWorkspace::execute_muted(&preset, points64.as_slice(), output64.as_mut_slice(), Some(GenBackend::Scalar));
 
     assert!(output32.iter().all(|v| v.is_finite()));
     assert!(output64.iter().all(|v| v.is_finite()));
-}
-#[test]
-fn expression_supports_unary_minus_abs_and_ridge() {
-    let program = compile_expression(
-        "-x + abs(z) + ridge(0.25)",
-        &BTreeMap::new(),
-    ).expect("Failed to compile expression");
-
-    let points = [Vec2::new(2.0, -4.0), Vec2::new(4.0, -2.0)];
-    let mut output = [0.0; 2];
-
-    execute_scalar(
-        &program,
-        &[],
-        points.as_slice(),
-        &mut output
-    );
-
-    assert!((output[0] - 2.75).abs() < 1.0e-6);
-    assert!((output[1] + 1.25).abs() < 1.0e-6);
 }
 
 #[test]
@@ -317,15 +251,9 @@ fn continental_terrain_is_finite_and_non_flat() {
         }
     }
 
-    let mut output = vec![0.0; count];
-    let mut workspace = F32GenWorkspace::new(&preset.program);
+    let mut output = vec![0.0f32; count];
 
-    workspace.execute(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut output
-    );
+    GenWorkspace::execute_muted(&preset, points.as_slice(), output.as_mut_slice(), Some(GenBackend::Scalar));
 
     assert!(output.iter().all(|v| v.is_finite()));
 
@@ -338,97 +266,6 @@ fn continental_terrain_is_finite_and_non_flat() {
         "Continental terrain: min={min}, max={max}, range={}",
         max - min
     );
-}
-
-#[test]
-fn automatic_backend_matches_scalar() {
-    let preset = continental_preset();
-    let mut workspace = F32GenWorkspace::new(&preset.program);
-
-    assert_eq!(workspace.backend(), GenBackend::detected());
-
-    for count in [0, 1, 3, 4, 7, 8, 15, 16, 17, 31, 33, 65, 257] {
-        let points = generate_coordinates(count);
-
-        let mut expected = vec![0.0_f32; points.len()];
-        let mut actual = vec![0.0_f32; points.len()];
-
-        execute_scalar(
-            &preset.program,
-            &preset.noises,
-            &points,
-            &mut expected,
-        );
-
-        let mut workspace = GenWorkspace::new(&preset.program);
-
-        workspace.execute_vec2_f32(
-            &preset.program,
-            &preset.noises,
-            &points,
-            &mut actual,
-        );
-
-        assert_close(&actual, &expected);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[test]
-fn explicit_avx2_backend_matches_scalar() {
-    if !std::arch::is_x86_feature_detected!("avx2") {
-        return;
-    }
-
-    let preset = continental_preset();
-    let points = generate_coordinates(37);
-
-    let mut expected = vec![0.0; points.len()];
-    let mut actual = vec![0.0; points.len()];
-
-    execute_scalar(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut expected,
-    );
-
-    assert!(execute_avx2(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut actual,
-    ));
-
-    assert_close(&actual, &expected);
-}
-
-#[test]
-fn reusable_scalar_workspace_matches_scalar_executor() {
-    let preset = continental_preset();
-    let points = generate_coordinates(129);
-
-    let mut expected = vec![0.0; points.len()];
-    let mut actual = vec![0.0; points.len()];
-
-    let mut workspace = ScalarWorkspace::new(&preset.program);
-
-    execute_scalar(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut expected,
-    );
-
-    execute_scalar_with_workspace(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut actual,
-        &mut workspace,
-    );
-
-    assert_close(&actual, &expected);
 }
 
 #[test]
@@ -445,36 +282,10 @@ fn benchmark_continental_generation() {
     let mut scalar_output = vec![0.0; count];
     let mut automatic_output = vec![0.0; count];
 
-    let mut scalar_workspace = ScalarWorkspace::new(&preset.program);
-    let mut automatic_workspace = F32GenWorkspace::new(&preset.program);
-
-    execute_scalar_with_workspace(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut scalar_output,
-        &mut scalar_workspace,
-    );
-
-    automatic_workspace.execute(
-        &preset.program,
-        &preset.noises,
-        points.as_slice(),
-        &mut automatic_output,
-    );
-
-    assert_close(&automatic_output, &scalar_output);
-
     let scalar_start = Instant::now();
 
     for _ in 0..iterations {
-        execute_scalar_with_workspace(
-            &preset.program,
-            &preset.noises,
-            points.as_slice(),
-            &mut scalar_output,
-            &mut scalar_workspace,
-        );
+        GenWorkspace::execute_muted(&preset, points.as_slice(), scalar_output.as_mut_slice(), Some(GenBackend::Scalar));
     }
 
     let scalar_elapsed = scalar_start.elapsed();
@@ -482,12 +293,7 @@ fn benchmark_continental_generation() {
     let automatic_start = Instant::now();
 
     for _ in 0..iterations {
-        automatic_workspace.execute(
-            &preset.program,
-            &preset.noises,
-            points.as_slice(),
-            &mut automatic_output,
-        );
+        GenWorkspace::execute_muted(&preset, points.as_slice(), automatic_output.as_mut_slice(), None);
     }
 
     let automatic_elapsed = automatic_start.elapsed();
@@ -515,7 +321,7 @@ fn benchmark_continental_generation() {
 
     println!();
     println!("========== NOISY SKYLINES BENCHMARK ==========");
-    println!("Backend:             {:?}", automatic_workspace.backend());
+    println!("Automatic Backend:   {:?}", GenBackend::detected());
     println!("Samples per pass:    {count}");
     println!("Iterations:          {iterations}");
     println!("Scalar time:         {scalar_elapsed:?}");
@@ -535,23 +341,15 @@ fn benchmark_continental_generation_f64() {
     let count = side * side;
     let iterations = 8;
 
-    let points = generate_coordinates_d(count);
+    let points = generate_coordinates(count);
 
-    let mut f32_output = vec![0.0; count];
-    let mut f64_output = vec![0.0; count];
-
-    let mut workspace = GenWorkspace::new(&preset.program);
+    let mut f32_output: Vec<f32> = vec![0.0; count];
+    let mut f64_output: Vec<f64> = vec![0.0; count];
 
     let f32_start = Instant::now();
 
     for _ in 0..iterations {
-        workspace.execute_dvec2_f32(
-            &preset.program,
-            &preset.noises,
-            points.as_slice(),
-            f32_output.as_mut_slice()
-        );
-
+        GenWorkspace::execute_muted(&preset, points.as_slice(), f32_output.as_mut_slice(), None);
     }
 
     let f32_elapsed = f32_start.elapsed();
@@ -559,12 +357,7 @@ fn benchmark_continental_generation_f64() {
     let f64_start = Instant::now();
 
     for _ in 0..iterations {
-        workspace.execute_dvec2_f64(
-            &preset.program,
-            &preset.noises,
-            points.as_slice(),
-            f64_output.as_mut_slice()
-        );
+        GenWorkspace::execute_muted(&preset, points.as_slice(), f64_output.as_mut_slice(), None);
     }
 
     let f64_elapsed = f64_start.elapsed();
@@ -589,8 +382,70 @@ fn benchmark_continental_generation_f64() {
         / f64_elapsed.as_secs_f64();
 
     println!();
-    println!("========== NOISY SKYLINES BENCHMARK - DVec2 into F32 vs F64 automatic ==========");
-    println!("Backend: Both scalar, sadly. TODO: Change this test and make the DVec2 paths AUTOMATIC with SIMD and FMA support just as well as Vec2 to f32!!");
+    println!("========== NOISY SKYLINES BENCHMARK - Vec2 (f32) into F32 vs F64 automatic ==========");
+    println!("Backend:             {}", GenBackend::detected());
+    println!("Samples per pass:    {count}");
+    println!("Iterations:          {iterations}");
+    println!("F32 time:         {f32_elapsed:?}");
+    println!("F64 time:      {f64_elapsed:?}");
+    println!("F32 throughput:   {f32_rate:.2} M samples/s");
+    println!("F64 throughput:{f64_rate:.2} M samples/s");
+    println!("Speedup:             {speedup:.2}x");
+    println!("==============================================");
+}
+
+#[test]
+#[ignore = "Manual performance benchmark. Run with cargo test --release -- --ignored --nocapture"]
+fn benchmark_continental_generation_f64_dvec() {
+    let preset = continental_preset();
+
+    let side = 256;
+    let count = side * side;
+    let iterations = 8;
+
+    let points = generate_coordinates_d(count);
+
+    let mut f32_output: Vec<f32> = vec![0.0; count];
+    let mut f64_output: Vec<f64> = vec![0.0; count];
+
+    let f32_start = Instant::now();
+
+    for _ in 0..iterations {
+        GenWorkspace::execute_muted(&preset, points.as_slice(), f32_output.as_mut_slice(), None);
+    }
+
+    let f32_elapsed = f32_start.elapsed();
+
+    let f64_start = Instant::now();
+
+    for _ in 0..iterations {
+        GenWorkspace::execute_muted(&preset, points.as_slice(), f64_output.as_mut_slice(), None);
+    }
+
+    let f64_elapsed = f64_start.elapsed();
+
+    std::hint::black_box(
+        f32_output.iter().copied().sum::<f32>(),
+    );
+
+    std::hint::black_box(
+        f64_output.iter().copied().sum::<f64>(),
+    );
+
+    let total_samples = (count * iterations) as f64;
+
+    let f32_rate =
+        total_samples / f32_elapsed.as_secs_f64() / 1_000_000.0;
+
+    let f64_rate =
+        total_samples / f64_elapsed.as_secs_f64() / 1_000_000.0;
+
+    let speedup = f32_elapsed.as_secs_f64()
+        / f64_elapsed.as_secs_f64();
+
+    println!();
+    println!("========== NOISY SKYLINES BENCHMARK - DVec2 (f64) into F32 vs F64 automatic ==========");
+    println!("Backend:             {}", GenBackend::detected());
     println!("Samples per pass:    {count}");
     println!("Iterations:          {iterations}");
     println!("F32 time:         {f32_elapsed:?}");

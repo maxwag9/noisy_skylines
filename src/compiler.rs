@@ -1,10 +1,11 @@
 
 use std::collections::BTreeMap;
-use crate::presets::{fbm_scalar, NoiseConfig, fbm_f64, fbm_dvec2_f32};
+use crate::presets::{fbm_scalar, NoiseConfig, fbm_f64, fbm_dvec2_f32, CompiledPreset};
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use glam::{DVec2, Vec2};
+use strum_macros::Display;
 #[cfg(target_arch = "x86_64")]
 use crate::presets::{
     fbm_avx2,
@@ -408,38 +409,370 @@ pub fn compile_expression(source: &str, noise_names: &BTreeMap<String, u16>) -> 
     })
 }
 
-#[derive(Clone, Debug)]
-pub struct ScalarWorkspace {
-    registers: Vec<f32>,
+
+trait IntoDVec2 {
+    fn into_dvec2(self) -> DVec2;
 }
 
-impl ScalarWorkspace {
-    pub fn new(program: &Program) -> Self {
-        Self {
-            registers: vec![0.0_f32; program.register_count],
+impl IntoDVec2 for Vec2 {
+    #[inline]
+    fn into_dvec2(self) -> DVec2 {
+        DVec2::new(self.x as f64, self.y as f64)
+    }
+}
+
+impl IntoDVec2 for DVec2 {
+    #[inline]
+    fn into_dvec2(self) -> DVec2 {
+        self
+    }
+}
+
+// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pub enum GenBackend {
+//     Avx512F,
+//     Avx2Fma,
+//     Avx2,
+//     AvxFma,
+//     Avx,
+//     Sse2,
+//     Scalar,
+// }
+// impl GenBackend {
+//     pub fn detected() -> GenBackend {
+//         #[cfg(target_arch = "x86_64")]
+//         {
+//             if is_x86_feature_detected!("avx512f") {
+//                 return GenBackend::Avx512F;
+//             }
+//
+//             if is_x86_feature_detected!("avx2")
+//                 && is_x86_feature_detected!("fma")
+//             {
+//                 return GenBackend::Avx2Fma;
+//             }
+//
+//             if is_x86_feature_detected!("avx2") {
+//                 return GenBackend::Avx2;
+//             }
+//
+//             if is_x86_feature_detected!("avx")
+//                 && is_x86_feature_detected!("fma")
+//             {
+//                 return GenBackend::AvxFma;
+//             }
+//
+//             if is_x86_feature_detected!("avx") {
+//                 return GenBackend::Avx;
+//             }
+//
+//             if is_x86_feature_detected!("sse2") {
+//                 return GenBackend::Sse2;
+//             }
+//         }
+//
+//         GenBackend::Scalar
+//     }
+// }
+
+// pub fn backend(&self) -> GenBackend {
+//     match self {
+//         Self::Scalar(_) => GenBackend::Scalar,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::Sse2(_) => GenBackend::Sse2,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::Avx(_) => GenBackend::Avx,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::AvxFma(_) => GenBackend::AvxFma,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::Avx2(_) => GenBackend::Avx2,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::Avx2Fma(_) => GenBackend::Avx2Fma,
+//
+//         #[cfg(target_arch = "x86_64")]
+//         Self::Avx512(_) => GenBackend::Avx512F,
+//     }
+// }
+
+
+
+mod sealed {
+    pub trait Point {}
+    pub trait Output<P> {}
+}
+
+pub trait GenPoint: sealed::Point + Copy {
+    const PRECISE_F32_FBM: bool;
+
+    fn coordinates_f32(self) -> (f32, f32);
+    fn coordinates_f64(self) -> (f64, f64);
+    fn into_dvec2(self) -> DVec2;
+    fn fbm_f32(self, config: &NoiseConfig) -> Option<f32>;
+}
+
+impl sealed::Point for Vec2 {}
+
+impl GenPoint for Vec2 {
+    const PRECISE_F32_FBM: bool = false;
+
+    #[inline]
+    fn coordinates_f32(self) -> (f32, f32) {
+        (self.x, self.y)
+    }
+
+    #[inline]
+    fn coordinates_f64(self) -> (f64, f64) {
+        (self.x as f64, self.y as f64)
+    }
+
+    #[inline]
+    fn into_dvec2(self) -> DVec2 {
+        DVec2::new(self.x as f64, self.y as f64)
+    }
+
+    #[inline]
+    fn fbm_f32(self, config: &NoiseConfig) -> Option<f32> {
+        Some(fbm_scalar(config, self))
+    }
+}
+
+impl sealed::Point for DVec2 {}
+
+impl GenPoint for DVec2 {
+    const PRECISE_F32_FBM: bool = true;
+
+    #[inline]
+    fn coordinates_f32(self) -> (f32, f32) {
+        (self.x as f32, self.y as f32)
+    }
+
+    #[inline]
+    fn coordinates_f64(self) -> (f64, f64) {
+        (self.x, self.y)
+    }
+
+    #[inline]
+    fn into_dvec2(self) -> DVec2 {
+        self
+    }
+
+    #[inline]
+    fn fbm_f32(self, config: &NoiseConfig) -> Option<f32> {
+        fbm_dvec2_f32(config, self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Display)]
+pub enum GenBackend {
+    Avx512F,
+    Avx2Fma,
+    Avx2,
+    AvxFma,
+    Avx,
+    Sse2,
+    Scalar,
+}
+
+impl GenBackend {
+    pub fn is_supported(self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            match self {
+                Self::Avx512F => {
+                    std::arch::is_x86_feature_detected!("avx512f")
+                }
+                Self::Avx2Fma => {
+                    std::arch::is_x86_feature_detected!("avx2")
+                        && std::arch::is_x86_feature_detected!("fma")
+                }
+                Self::Avx2 => {
+                    std::arch::is_x86_feature_detected!("avx2")
+                }
+                Self::AvxFma => {
+                    std::arch::is_x86_feature_detected!("avx")
+                        && std::arch::is_x86_feature_detected!("fma")
+                }
+                Self::Avx => {
+                    std::arch::is_x86_feature_detected!("avx")
+                }
+                Self::Sse2 => {
+                    std::arch::is_x86_feature_detected!("sse2")
+                }
+                Self::Scalar => true,
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            matches!(self, Self::Scalar)
+        }
+    }
+
+    pub fn detected() -> Self {
+        if Self::Avx512F.is_supported() {
+            return Self::Avx512F;
+        }
+
+        if Self::Avx2Fma.is_supported() {
+            return Self::Avx2Fma;
+        }
+
+        if Self::Avx2.is_supported() {
+            return Self::Avx2;
+        }
+
+        if Self::AvxFma.is_supported() {
+            return Self::AvxFma;
+        }
+
+        if Self::Avx.is_supported() {
+            return Self::Avx;
+        }
+
+        if Self::Sse2.is_supported() {
+            return Self::Sse2;
+        }
+
+        Self::Scalar
+    }
+
+    fn resolve(requested: Option<Self>) -> Self {
+        match requested {
+            Some(backend) if backend.is_supported() => backend,
+            _ => Self::detected(),
         }
     }
 }
 
-pub fn execute_scalar_with_workspace(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[Vec2],
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerationError {
+    NonFiniteCoordinate {
+        index: usize,
+    },
+    CoordinateOutOfRange {
+        index: usize,
+    },
+    OutputLengthMismatch {
+        points: usize,
+        output: usize,
+    },
+    InvalidProgram,
+}
+
+impl std::fmt::Display for GenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFiniteCoordinate { index } => {
+                write!(f, "Non-finite coordinate at point {index}")
+            }
+            Self::CoordinateOutOfRange { index } => {
+                write!(
+                    f,
+                    "Coordinate exceeds the supported noise lattice range at point {index}"
+                )
+            }
+            Self::OutputLengthMismatch { points, output } => {
+                write!(
+                    f,
+                    "Point count ({points}) does not match output length ({output})"
+                )
+            }
+            Self::InvalidProgram => {
+                write!(f, "The compiled expression program is invalid")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GenerationError {}
+
+fn validate_program(preset: &CompiledPreset) -> Result<(), GenerationError> {
+    let program = &preset.program;
+
+    if program.instructions.is_empty()
+        || program.register_count < 2
+        || program.output as usize >= program.register_count
+    {
+        return Err(GenerationError::InvalidProgram);
+    }
+
+    let valid_register = |register: u16| {
+        (register as usize) < program.register_count
+    };
+
+    for instruction in &program.instructions {
+        let valid = match *instruction {
+            Instruction::Input { dst, .. } => {
+                valid_register(dst)
+            }
+            Instruction::Constant { dst, .. } => {
+                valid_register(dst)
+            }
+            Instruction::Add { dst, a, b }
+            | Instruction::Sub { dst, a, b }
+            | Instruction::Mul { dst, a, b }
+            | Instruction::Div { dst, a, b } => {
+                valid_register(dst)
+                    && valid_register(a)
+                    && valid_register(b)
+            }
+            Instruction::Fbm { dst, noise } => {
+                valid_register(dst)
+                    && (noise as usize) < preset.noises.len()
+            }
+            Instruction::Ridge { dst, source }
+            | Instruction::Abs { dst, source } => {
+                valid_register(dst)
+                    && valid_register(source)
+            }
+        };
+
+        if !valid {
+            return Err(GenerationError::InvalidProgram);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_points<P: GenPoint>(
+    points: &[P],
+) -> Result<(), GenerationError> {
+    for (index, point) in points.iter().copied().enumerate() {
+        let point = point.into_dvec2();
+
+        if !point.x.is_finite() || !point.y.is_finite() {
+            return Err(GenerationError::NonFiniteCoordinate { index });
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_scalar_f32<P: GenPoint>(
+    preset: &CompiledPreset,
+    points: &[P],
     output: &mut [f32],
-    workspace: &mut ScalarWorkspace,
-) {
-    let count = points.len().min(output.len());
-    let registers = &mut workspace.registers;
+    index_offset: usize,
+    registers: &mut [f32]
+) -> Result<(), GenerationError> {
+    let program = &preset.program;
 
-    for index in 0..count {
-        let point = points[index];
-
+    for (local_index, point) in points.iter().copied().enumerate() {
+        let index = index_offset + local_index;
         for instruction in &program.instructions {
             match *instruction {
                 Instruction::Input { dst, axis } => {
+                    let (x, z) = point.coordinates_f32();
+
                     registers[dst as usize] = match axis {
-                        Axis::X => point.x,
-                        Axis::Z => point.y,
+                        Axis::X => x,
+                        Axis::Z => z,
                     };
                 }
 
@@ -472,10 +805,11 @@ pub fn execute_scalar_with_workspace(
                 }
 
                 Instruction::Fbm { dst, noise } => {
-                    registers[dst as usize] = fbm_scalar(
-                        &noises[noise as usize],
-                        point,
-                    );
+                    registers[dst as usize] = point
+                        .fbm_f32(&preset.noises[noise as usize])
+                        .ok_or(
+                            GenerationError::CoordinateOutOfRange { index },
+                        )?;
                 }
 
                 Instruction::Ridge { dst, source } => {
@@ -492,454 +826,30 @@ pub fn execute_scalar_with_workspace(
 
         output[index] = registers[program.output as usize];
     }
+
+    Ok(())
 }
 
-pub fn execute_scalar(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[Vec2],
-    output: &mut [f32],
-) {
-    let mut workspace = ScalarWorkspace::new(program);
-
-    execute_scalar_with_workspace(
-        program,
-        noises,
-        points,
-        output,
-        &mut workspace,
-    );
-}
-
-
-#[cfg(target_arch = "x86_64")]
-pub fn create_avx2_workspace(program: &Program) -> Option<Avx2Workspace> {
-    if !is_x86_feature_detected!("avx2") {
-        return None;
-    }
-
-    Some(unsafe { create_avx2_workspace_inner(program) })
-}
-
-#[cfg(target_arch = "x86_64")]
-pub unsafe fn execute_avx2_with_workspace_unchecked(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[Vec2],
-    output: &mut [f32],
-    workspace: &mut Avx2Workspace,
-) {
-    unsafe {
-        execute_avx2_inner(
-            program,
-            noises,
-            points,
-            output,
-            &mut workspace.registers,
-            &mut workspace.scalar,
-        );
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-pub fn execute_avx2_with_workspace(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[Vec2],
-    output: &mut [f32],
-    workspace: &mut Avx2Workspace,
-) -> bool {
-    if !is_x86_feature_detected!("avx2") {
-        return false;
-    }
-
-    unsafe {
-        execute_avx2_with_workspace_unchecked(
-            program,
-            noises,
-            points,
-            output,
-            workspace,
-        );
-    }
-
-    true
-}
-
-pub fn execute_avx2(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[Vec2],
-    output: &mut [f32],
-) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let Some(mut workspace) = create_avx2_workspace(program) else {
-            return false;
-        };
-
-        execute_avx2_with_workspace(
-            program,
-            noises,
-            points,
-            output,
-            &mut workspace,
-        )
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = (program, noises, xs, zs, output);
-        false
-    }
-}
-
-
-pub fn instruction_count(program: &Program) -> usize {
-    program.instructions.len()
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx")]
-unsafe fn fbm_avx1_batch(
-    config: &NoiseConfig,
-    x: __m256,
-    z: __m256,
-) -> __m256 {
-    unsafe {
-        let mut xs = [0.0_f32; 8];
-        let mut zs = [0.0_f32; 8];
-        let mut result = [0.0_f32; 8];
-
-        _mm256_storeu_ps(xs.as_mut_ptr(), x);
-        _mm256_storeu_ps(zs.as_mut_ptr(), z);
-
-        for lane in 0..8 {
-            result[lane] = fbm_scalar(config, Vec2::new(xs[lane], zs[lane]));
-        }
-
-        _mm256_loadu_ps(result.as_ptr())
-    }
-}
-#[inline(always)]
-fn load_point_batch<const LANES: usize>(
-    points: &[Vec2],
-    base: usize,
-) -> ([f32; LANES], [f32; LANES]) {
-    let mut xs = [0.0_f32; LANES];
-    let mut zs = [0.0_f32; LANES];
-
-    for lane in 0..LANES {
-        let point = points[base + lane];
-
-        xs[lane] = point.x;
-        zs[lane] = point.y;
-    }
-
-    (xs, zs)
-}
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx,fma")]
-unsafe fn fbm_avx1_fma_batch(
-    config: &NoiseConfig,
-    x: __m256,
-    z: __m256,
-) -> __m256 {
-    unsafe {
-        let mut xs = [0.0_f32; 8];
-        let mut zs = [0.0_f32; 8];
-        let mut result = [0.0_f32; 8];
-
-        _mm256_storeu_ps(xs.as_mut_ptr(), x);
-        _mm256_storeu_ps(zs.as_mut_ptr(), z);
-
-        for lane in 0..8 {
-            result[lane] = fbm_scalar_fma(config, xs[lane], zs[lane]);
-        }
-
-        _mm256_loadu_ps(result.as_ptr())
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-unsafe fn fbm_sse2_batch(
-    config: &NoiseConfig,
-    x: __m128,
-    z: __m128,
-) -> __m128 {
-    unsafe {
-        let mut xs = [0.0_f32; 4];
-        let mut zs = [0.0_f32; 4];
-        let mut result = [0.0_f32; 4];
-
-        _mm_storeu_ps(xs.as_mut_ptr(), x);
-        _mm_storeu_ps(zs.as_mut_ptr(), z);
-
-        for lane in 0..4 {
-            result[lane] = fbm_scalar(config, Vec2::new(xs[lane], zs[lane]));
-        }
-
-        _mm_loadu_ps(result.as_ptr())
-    }
-}
-#[cfg(target_arch = "x86_64")]
-macro_rules! define_simd_executor {
-    (
-        $name:ident,
-        $feature:literal,
-        $vector:ty,
-        $lanes:expr,
-        $load:ident,
-        $store:ident,
-        $set1:ident,
-        $add:ident,
-        $sub:ident,
-        $mul:ident,
-        $div:ident,
-        $andnot:ident,
-        $fbm:ident
-    ) => {
-        #[target_feature(enable = $feature)]
-        unsafe fn $name(
-            program: &Program,
-            noises: &[NoiseConfig],
-            points: &[Vec2],
-            output: &mut [f32],
-            registers: &mut [$vector],
-            scalar_workspace: &mut ScalarWorkspace,
-        ) {
-            let count = points.len().min(output.len());
-            let vector_count = count / $lanes * $lanes;
-            let mut base = 0;
-
-            while base < vector_count {
-                unsafe {
-                    let (xs, zs) = load_point_batch::<$lanes>(points, base);
-
-                    let x_values = $load(xs.as_ptr());
-                    let z_values = $load(zs.as_ptr());
-
-                    for instruction in &program.instructions {
-                        match *instruction {
-                            Instruction::Input { dst, axis } => {
-                                registers[dst as usize] = match axis {
-                                    Axis::X => x_values,
-                                    Axis::Z => z_values,
-                                };
-                            }
-
-                            Instruction::Constant {
-                                dst,
-                                value_f32,
-                                ..
-                            } => {
-                                registers[dst as usize] = $set1(value_f32);
-                            }
-
-                            Instruction::Add { dst, a, b } => {
-                                registers[dst as usize] = $add(
-                                    registers[a as usize],
-                                    registers[b as usize],
-                                );
-                            }
-
-                            Instruction::Sub { dst, a, b } => {
-                                registers[dst as usize] = $sub(
-                                    registers[a as usize],
-                                    registers[b as usize],
-                                );
-                            }
-
-                            Instruction::Mul { dst, a, b } => {
-                                registers[dst as usize] = $mul(
-                                    registers[a as usize],
-                                    registers[b as usize],
-                                );
-                            }
-
-                            Instruction::Div { dst, a, b } => {
-                                registers[dst as usize] = $div(
-                                    registers[a as usize],
-                                    registers[b as usize],
-                                );
-                            }
-
-                            Instruction::Fbm { dst, noise } => {
-                                registers[dst as usize] = $fbm(
-                                    &noises[noise as usize],
-                                    x_values,
-                                    z_values,
-                                );
-                            }
-
-                            Instruction::Ridge { dst, source } => {
-                                let sign = $set1(-0.0);
-                                let absolute = $andnot(
-                                    sign,
-                                    registers[source as usize],
-                                );
-
-                                registers[dst as usize] = $sub(
-                                    $set1(1.0),
-                                    absolute,
-                                );
-                            }
-
-                            Instruction::Abs { dst, source } => {
-                                registers[dst as usize] = $andnot(
-                                    $set1(-0.0),
-                                    registers[source as usize],
-                                );
-                            }
-                        }
-                    }
-
-                    $store(
-                        output.as_mut_ptr().add(base),
-                        registers[program.output as usize],
-                    );
-                }
-
-                base += $lanes;
-            }
-
-            if vector_count < count {
-                execute_scalar_with_workspace(
-                    program,
-                    noises,
-                    &points[vector_count..count],
-                    &mut output[vector_count..count],
-                    scalar_workspace,
-                );
-            }
-        }
-    };
-}
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_avx512_inner,
-    "avx512f",
-    __m512,
-    16,
-    _mm512_loadu_ps,
-    _mm512_storeu_ps,
-    _mm512_set1_ps,
-    _mm512_add_ps,
-    _mm512_sub_ps,
-    _mm512_mul_ps,
-    _mm512_div_ps,
-    _mm512_andnot_ps,
-    fbm_avx512_fma
-);
-
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_avx2_fma_inner,
-    "avx2,fma",
-    __m256,
-    8,
-    _mm256_loadu_ps,
-    _mm256_storeu_ps,
-    _mm256_set1_ps,
-    _mm256_add_ps,
-    _mm256_sub_ps,
-    _mm256_mul_ps,
-    _mm256_div_ps,
-    _mm256_andnot_ps,
-    fbm_avx2_fma
-);
-
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_avx2_inner,
-    "avx2",
-    __m256,
-    8,
-    _mm256_loadu_ps,
-    _mm256_storeu_ps,
-    _mm256_set1_ps,
-    _mm256_add_ps,
-    _mm256_sub_ps,
-    _mm256_mul_ps,
-    _mm256_div_ps,
-    _mm256_andnot_ps,
-    fbm_avx2
-);
-
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_avx1_fma_inner,
-    "avx,fma",
-    __m256,
-    8,
-    _mm256_loadu_ps,
-    _mm256_storeu_ps,
-    _mm256_set1_ps,
-    _mm256_add_ps,
-    _mm256_sub_ps,
-    _mm256_mul_ps,
-    _mm256_div_ps,
-    _mm256_andnot_ps,
-    fbm_avx1_fma_batch
-);
-
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_avx1_inner,
-    "avx",
-    __m256,
-    8,
-    _mm256_loadu_ps,
-    _mm256_storeu_ps,
-    _mm256_set1_ps,
-    _mm256_add_ps,
-    _mm256_sub_ps,
-    _mm256_mul_ps,
-    _mm256_div_ps,
-    _mm256_andnot_ps,
-    fbm_avx1_batch
-);
-
-#[cfg(target_arch = "x86_64")]
-define_simd_executor!(
-    execute_sse2_inner,
-    "sse2",
-    __m128,
-    4,
-    _mm_loadu_ps,
-    _mm_storeu_ps,
-    _mm_set1_ps,
-    _mm_add_ps,
-    _mm_sub_ps,
-    _mm_mul_ps,
-    _mm_div_ps,
-    _mm_andnot_ps,
-    fbm_sse2_batch
-);
-fn execute_f64_with_workspace<P: IntoDVec2 + Copy>(
-    program: &Program,
-    noises: &[NoiseConfig],
+fn execute_scalar_f64<P: GenPoint>(
+    preset: &CompiledPreset,
     points: &[P],
     output: &mut [f64],
-    workspace: &mut ScalarWorkspaceF64,
+    index_offset: usize,
+    registers: &mut [f64]
 ) -> Result<(), GenerationError> {
-    let count = points.len().min(output.len());
-    let registers = &mut workspace.registers;
+    let program = &preset.program;
 
-    for index in 0..count {
-        let point = points[index].into_dvec2();
-
-        if !point.x.is_finite() || !point.y.is_finite() {
-            return Err(GenerationError::NonFiniteCoordinate { index });
-        }
-
+    for (local_index, point) in points.iter().copied().enumerate() {
+        let index = index_offset + local_index;
+        let point64 = point.into_dvec2();
         for instruction in &program.instructions {
             match *instruction {
                 Instruction::Input { dst, axis } => {
+                    let (x, z) = point.coordinates_f64();
+
                     registers[dst as usize] = match axis {
-                        Axis::X => point.x,
-                        Axis::Z => point.y,
+                        Axis::X => x,
+                        Axis::Z => z,
                     };
                 }
 
@@ -973,8 +883,8 @@ fn execute_f64_with_workspace<P: IntoDVec2 + Copy>(
 
                 Instruction::Fbm { dst, noise } => {
                     registers[dst as usize] = fbm_f64(
-                        &noises[noise as usize],
-                        point,
+                        &preset.noises[noise as usize],
+                        point64,
                     )
                         .ok_or(
                             GenerationError::CoordinateOutOfRange { index },
@@ -998,538 +908,800 @@ fn execute_f64_with_workspace<P: IntoDVec2 + Copy>(
 
     Ok(())
 }
-fn execute_dvec2_f32_with_workspace(
-    program: &Program,
-    noises: &[NoiseConfig],
-    points: &[DVec2],
-    output: &mut [f32],
-    workspace: &mut ScalarWorkspace,
-) -> Result<(), GenerationError> {
-    let count = points.len().min(output.len());
-    let registers = &mut workspace.registers;
 
-    for index in 0..count {
-        let point = points[index];
+#[inline]
+fn load_point_batch_f32<P: GenPoint, const LANES: usize>(
+    points: &[P],
+    base: usize,
+) -> ([f32; LANES], [f32; LANES]) {
+    let mut xs = [0.0_f32; LANES];
+    let mut zs = [0.0_f32; LANES];
 
-        if !point.x.is_finite() || !point.y.is_finite() {
-            return Err(GenerationError::NonFiniteCoordinate { index });
-        }
-
-        for instruction in &program.instructions {
-            match *instruction {
-                Instruction::Input { dst, axis } => {
-                    registers[dst as usize] = match axis {
-                        Axis::X => point.x as f32,
-                        Axis::Z => point.y as f32,
-                    };
-                }
-
-                Instruction::Constant {
-                    dst,
-                    value_f32,
-                    ..
-                } => {
-                    registers[dst as usize] = value_f32;
-                }
-
-                Instruction::Add { dst, a, b } => {
-                    registers[dst as usize] =
-                        registers[a as usize] + registers[b as usize];
-                }
-
-                Instruction::Sub { dst, a, b } => {
-                    registers[dst as usize] =
-                        registers[a as usize] - registers[b as usize];
-                }
-
-                Instruction::Mul { dst, a, b } => {
-                    registers[dst as usize] =
-                        registers[a as usize] * registers[b as usize];
-                }
-
-                Instruction::Div { dst, a, b } => {
-                    registers[dst as usize] =
-                        registers[a as usize] / registers[b as usize];
-                }
-
-                Instruction::Fbm { dst, noise } => {
-                    registers[dst as usize] = fbm_dvec2_f32(
-                        &noises[noise as usize],
-                        point,
-                    )
-                        .ok_or(
-                            GenerationError::CoordinateOutOfRange { index },
-                        )?;
-                }
-
-                Instruction::Ridge { dst, source } => {
-                    registers[dst as usize] =
-                        1.0 - registers[source as usize].abs();
-                }
-
-                Instruction::Abs { dst, source } => {
-                    registers[dst as usize] =
-                        registers[source as usize].abs();
-                }
-            }
-        }
-
-        output[index] = registers[program.output as usize];
+    for lane in 0..LANES {
+        let (x, z) = points[base + lane].coordinates_f32();
+        xs[lane] = x;
+        zs[lane] = z;
     }
 
-    Ok(())
-}
-#[derive(Clone, Debug)]
-#[cfg(target_arch = "x86_64")]
-pub struct Sse2Workspace {
-    registers: Vec<__m128>,
-    scalar: ScalarWorkspace,
-}
-#[derive(Clone, Debug)]
-#[cfg(target_arch = "x86_64")]
-pub struct AvxWorkspace {
-    registers: Vec<__m256>,
-    scalar: ScalarWorkspace,
-}
-#[cfg(target_arch = "x86_64")]
-pub type Avx2Workspace = AvxWorkspace;
-#[derive(Clone, Debug)]
-#[cfg(target_arch = "x86_64")]
-pub struct Avx512Workspace {
-    registers: Vec<__m512>,
-    scalar: ScalarWorkspace,
-}
-#[derive(Clone, Debug)]
-pub struct ScalarWorkspaceF64 {
-    registers: Vec<f64>,
+    (xs, zs)
 }
 
-impl ScalarWorkspaceF64 {
-    pub fn new(program: &Program) -> Self {
-        Self {
-            registers: vec![0.0_f64; program.register_count],
-        }
-    }
-}
-trait IntoDVec2 {
-    fn into_dvec2(self) -> DVec2;
-}
+#[inline]
+fn load_point_batch_f64<P: GenPoint, const LANES: usize>(
+    points: &[P],
+    base: usize,
+) -> ([f64; LANES], [f64; LANES]) {
+    let mut xs = [0.0_f64; LANES];
+    let mut zs = [0.0_f64; LANES];
 
-impl IntoDVec2 for Vec2 {
-    #[inline]
-    fn into_dvec2(self) -> DVec2 {
-        DVec2::new(self.x as f64, self.y as f64)
-    }
-}
-
-impl IntoDVec2 for DVec2 {
-    #[inline]
-    fn into_dvec2(self) -> DVec2 {
-        self
-    }
-}
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-unsafe fn create_sse2_workspace_inner(program: &Program) -> Sse2Workspace {
-    let mut registers = Vec::with_capacity(program.register_count);
-
-    for _ in 0..program.register_count {
-        registers.push(_mm_setzero_ps());
+    for lane in 0..LANES {
+        let (x, z) = points[base + lane].coordinates_f64();
+        xs[lane] = x;
+        zs[lane] = z;
     }
 
-    Sse2Workspace {
-        registers,
-        scalar: ScalarWorkspace::new(program),
-    }
+    (xs, zs)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx")]
-unsafe fn create_avx_workspace_inner(program: &Program) -> AvxWorkspace {
-    let mut registers = Vec::with_capacity(program.register_count);
+unsafe fn fbm_avx_batch(
+    config: &NoiseConfig,
+    x: __m256,
+    z: __m256,
+) -> __m256 {
+    unsafe {
+        let mut xs = [0.0_f32; 8];
+        let mut zs = [0.0_f32; 8];
+        let mut values = [0.0_f32; 8];
 
-    for _ in 0..program.register_count {
-        registers.push(_mm256_setzero_ps());
-    }
+        _mm256_storeu_ps(xs.as_mut_ptr(), x);
+        _mm256_storeu_ps(zs.as_mut_ptr(), z);
 
-    AvxWorkspace {
-        registers,
-        scalar: ScalarWorkspace::new(program),
+        for lane in 0..8 {
+            values[lane] = fbm_scalar(
+                config,
+                Vec2::new(xs[lane], zs[lane]),
+            );
+        }
+
+        _mm256_loadu_ps(values.as_ptr())
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn create_avx2_workspace_inner(program: &Program) -> Avx2Workspace {
-    let mut registers = Vec::with_capacity(program.register_count);
+#[target_feature(enable = "avx,fma")]
+unsafe fn fbm_avx_fma_batch(
+    config: &NoiseConfig,
+    x: __m256,
+    z: __m256,
+) -> __m256 {
+    unsafe {
+        let mut xs = [0.0_f32; 8];
+        let mut zs = [0.0_f32; 8];
+        let mut values = [0.0_f32; 8];
 
-    for _ in 0..program.register_count {
-        registers.push(_mm256_setzero_ps());
-    }
+        _mm256_storeu_ps(xs.as_mut_ptr(), x);
+        _mm256_storeu_ps(zs.as_mut_ptr(), z);
 
-    Avx2Workspace {
-        registers,
-        scalar: ScalarWorkspace::new(program),
+        for lane in 0..8 {
+            values[lane] = fbm_scalar_fma(
+                config,
+                xs[lane],
+                zs[lane],
+            );
+        }
+
+        _mm256_loadu_ps(values.as_ptr())
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-unsafe fn create_avx512_workspace_inner(program: &Program) -> Avx512Workspace {
-    let mut registers = Vec::with_capacity(program.register_count);
+#[target_feature(enable = "sse2")]
+unsafe fn fbm_sse2_batch(
+    config: &NoiseConfig,
+    x: __m128,
+    z: __m128,
+) -> __m128 {
+    unsafe {
+        let mut xs = [0.0_f32; 4];
+        let mut zs = [0.0_f32; 4];
+        let mut values = [0.0_f32; 4];
 
-    for _ in 0..program.register_count {
-        registers.push(_mm512_setzero_ps());
-    }
+        _mm_storeu_ps(xs.as_mut_ptr(), x);
+        _mm_storeu_ps(zs.as_mut_ptr(), z);
 
-    Avx512Workspace {
-        registers,
-        scalar: ScalarWorkspace::new(program),
+        for lane in 0..4 {
+            values[lane] = fbm_scalar(
+                config,
+                Vec2::new(xs[lane], zs[lane]),
+            );
+        }
+
+        _mm_loadu_ps(values.as_ptr())
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GenBackend {
-    Avx512F,
-    Avx2Fma,
-    Avx2,
-    AvxFma,
-    Avx,
-    Sse2,
-    Scalar,
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! define_f32_simd_executor {
+    (
+        $name:ident,
+        $feature:literal,
+        $vector:ty,
+        $lanes:expr,
+        $load:ident,
+        $store:ident,
+        $zero:ident,
+        $set1:ident,
+        $add:ident,
+        $sub:ident,
+        $mul:ident,
+        $div:ident,
+        $andnot:ident,
+        $fbm:ident
+    ) => {
+        #[target_feature(enable = $feature)]
+        unsafe fn $name<P: GenPoint>(
+            preset: &CompiledPreset,
+            points: &[P],
+            output: &mut [f32],
+        ) -> Result<(), GenerationError> {
+            unsafe {
+                let program = &preset.program;
+
+                let mut registers: Vec<$vector> =
+                    vec![$zero(); program.register_count];
+
+                let mut scalar_registers =
+                    vec![0.0_f32; program.register_count];
+
+                let vector_count =
+                    points.len() / $lanes * $lanes;
+
+                let mut base = 0;
+
+                while base < vector_count {
+                    let (xs, zs) =
+                        load_point_batch_f32::<P, $lanes>(points, base);
+
+                    let x_values = $load(xs.as_ptr());
+                    let z_values = $load(zs.as_ptr());
+
+                    for instruction in &program.instructions {
+                        match *instruction {
+                            Instruction::Input { dst, axis } => {
+                                registers[dst as usize] = match axis {
+                                    Axis::X => x_values,
+                                    Axis::Z => z_values,
+                                };
+                            }
+
+                            Instruction::Constant {
+                                dst,
+                                value_f32,
+                                ..
+                            } => {
+                                registers[dst as usize] =
+                                    $set1(value_f32);
+                            }
+
+                            Instruction::Add { dst, a, b } => {
+                                registers[dst as usize] = $add(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Sub { dst, a, b } => {
+                                registers[dst as usize] = $sub(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Mul { dst, a, b } => {
+                                registers[dst as usize] = $mul(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Div { dst, a, b } => {
+                                registers[dst as usize] = $div(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Fbm { dst, noise } => {
+                                let config = &preset.noises[noise as usize];
+
+                                registers[dst as usize] =
+                                    if P::PRECISE_F32_FBM {
+                                        let mut values =
+                                            [0.0_f32; $lanes];
+
+                                        for lane in 0..$lanes {
+                                            values[lane] = points[base + lane]
+                                                .fbm_f32(config)
+                                                .ok_or(
+                                                    GenerationError::CoordinateOutOfRange {
+                                                        index: base + lane,
+                                                    },
+                                                )?;
+                                        }
+
+                                        $load(values.as_ptr())
+                                    } else {
+                                        $fbm(
+                                            config,
+                                            x_values,
+                                            z_values,
+                                        )
+                                    };
+                            }
+
+                            Instruction::Ridge { dst, source } => {
+                                let absolute = $andnot(
+                                    $set1(-0.0),
+                                    registers[source as usize],
+                                );
+
+                                registers[dst as usize] = $sub(
+                                    $set1(1.0),
+                                    absolute,
+                                );
+                            }
+
+                            Instruction::Abs { dst, source } => {
+                                registers[dst as usize] = $andnot(
+                                    $set1(-0.0),
+                                    registers[source as usize],
+                                );
+                            }
+                        }
+                    }
+
+                    $store(
+                        output.as_mut_ptr().add(base),
+                        registers[program.output as usize],
+                    );
+
+                    base += $lanes;
+                }
+
+                if vector_count < points.len() {
+                    execute_scalar_f32(
+                        preset,
+                        &points[vector_count..],
+                        &mut output[vector_count..],
+                        vector_count,
+                        &mut scalar_registers,
+                    )?;
+                }
+
+                Ok(())
+            }
+        }
+    };
 }
-impl GenBackend {
-    pub fn detected() -> GenBackend {
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_sse2_f32_inner,
+    "sse2",
+    __m128,
+    4,
+    _mm_loadu_ps,
+    _mm_storeu_ps,
+    _mm_setzero_ps,
+    _mm_set1_ps,
+    _mm_add_ps,
+    _mm_sub_ps,
+    _mm_mul_ps,
+    _mm_div_ps,
+    _mm_andnot_ps,
+    fbm_sse2_batch
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_avx_f32_inner,
+    "avx",
+    __m256,
+    8,
+    _mm256_loadu_ps,
+    _mm256_storeu_ps,
+    _mm256_setzero_ps,
+    _mm256_set1_ps,
+    _mm256_add_ps,
+    _mm256_sub_ps,
+    _mm256_mul_ps,
+    _mm256_div_ps,
+    _mm256_andnot_ps,
+    fbm_avx_batch
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_avx_fma_f32_inner,
+    "avx,fma",
+    __m256,
+    8,
+    _mm256_loadu_ps,
+    _mm256_storeu_ps,
+    _mm256_setzero_ps,
+    _mm256_set1_ps,
+    _mm256_add_ps,
+    _mm256_sub_ps,
+    _mm256_mul_ps,
+    _mm256_div_ps,
+    _mm256_andnot_ps,
+    fbm_avx_fma_batch
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_avx2_f32_inner,
+    "avx2",
+    __m256,
+    8,
+    _mm256_loadu_ps,
+    _mm256_storeu_ps,
+    _mm256_setzero_ps,
+    _mm256_set1_ps,
+    _mm256_add_ps,
+    _mm256_sub_ps,
+    _mm256_mul_ps,
+    _mm256_div_ps,
+    _mm256_andnot_ps,
+    fbm_avx2
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_avx2_fma_f32_inner,
+    "avx2,fma",
+    __m256,
+    8,
+    _mm256_loadu_ps,
+    _mm256_storeu_ps,
+    _mm256_setzero_ps,
+    _mm256_set1_ps,
+    _mm256_add_ps,
+    _mm256_sub_ps,
+    _mm256_mul_ps,
+    _mm256_div_ps,
+    _mm256_andnot_ps,
+    fbm_avx2_fma
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f32_simd_executor!(
+    execute_avx512_f32_inner,
+    "avx512f",
+    __m512,
+    16,
+    _mm512_loadu_ps,
+    _mm512_storeu_ps,
+    _mm512_setzero_ps,
+    _mm512_set1_ps,
+    _mm512_add_ps,
+    _mm512_sub_ps,
+    _mm512_mul_ps,
+    _mm512_div_ps,
+    _mm512_andnot_ps,
+    fbm_avx512_fma
+);
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! define_f64_simd_executor {
+    (
+        $name:ident,
+        $feature:literal,
+        $vector:ty,
+        $lanes:expr,
+        $load:ident,
+        $store:ident,
+        $zero:ident,
+        $set1:ident,
+        $add:ident,
+        $sub:ident,
+        $mul:ident,
+        $div:ident,
+        $andnot:ident
+    ) => {
+        #[target_feature(enable = $feature)]
+        unsafe fn $name<P: GenPoint>(
+            preset: &CompiledPreset,
+            points: &[P],
+            output: &mut [f64],
+        ) -> Result<(), GenerationError> {
+            unsafe {
+                let program = &preset.program;
+
+                let mut registers: Vec<$vector> =
+                    vec![$zero(); program.register_count];
+
+                let mut scalar_registers =
+                    vec![0.0_f64; program.register_count];
+
+                let vector_count =
+                    points.len() / $lanes * $lanes;
+
+                let mut base = 0;
+
+                while base < vector_count {
+                    let (xs, zs) =
+                        load_point_batch_f64::<P, $lanes>(points, base);
+
+                    let x_values = $load(xs.as_ptr());
+                    let z_values = $load(zs.as_ptr());
+
+                    for instruction in &program.instructions {
+                        match *instruction {
+                            Instruction::Input { dst, axis } => {
+                                registers[dst as usize] = match axis {
+                                    Axis::X => x_values,
+                                    Axis::Z => z_values,
+                                };
+                            }
+
+                            Instruction::Constant {
+                                dst,
+                                value_f64,
+                                ..
+                            } => {
+                                registers[dst as usize] =
+                                    $set1(value_f64);
+                            }
+
+                            Instruction::Add { dst, a, b } => {
+                                registers[dst as usize] = $add(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Sub { dst, a, b } => {
+                                registers[dst as usize] = $sub(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Mul { dst, a, b } => {
+                                registers[dst as usize] = $mul(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Div { dst, a, b } => {
+                                registers[dst as usize] = $div(
+                                    registers[a as usize],
+                                    registers[b as usize],
+                                );
+                            }
+
+                            Instruction::Fbm { dst, noise } => {
+                                let config = &preset.noises[noise as usize];
+                                let mut values = [0.0_f64; $lanes];
+
+                                for lane in 0..$lanes {
+                                    values[lane] = fbm_f64(
+                                        config,
+                                        points[base + lane].into_dvec2(),
+                                    )
+                                    .ok_or(
+                                        GenerationError::CoordinateOutOfRange {
+                                            index: base + lane,
+                                        },
+                                    )?;
+                                }
+
+                                registers[dst as usize] =
+                                    $load(values.as_ptr());
+                            }
+
+                            Instruction::Ridge { dst, source } => {
+                                let absolute = $andnot(
+                                    $set1(-0.0),
+                                    registers[source as usize],
+                                );
+
+                                registers[dst as usize] = $sub(
+                                    $set1(1.0),
+                                    absolute,
+                                );
+                            }
+
+                            Instruction::Abs { dst, source } => {
+                                registers[dst as usize] = $andnot(
+                                    $set1(-0.0),
+                                    registers[source as usize],
+                                );
+                            }
+                        }
+                    }
+
+                    $store(
+                        output.as_mut_ptr().add(base),
+                        registers[program.output as usize],
+                    );
+
+                    base += $lanes;
+                }
+
+                if vector_count < points.len() {
+                    execute_scalar_f64(
+                        preset,
+                        &points[vector_count..],
+                        &mut output[vector_count..],
+                        vector_count,
+                        &mut scalar_registers,
+                    )?;
+                }
+
+                Ok(())
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+define_f64_simd_executor!(
+    execute_sse2_f64_inner,
+    "sse2",
+    __m128d,
+    2,
+    _mm_loadu_pd,
+    _mm_storeu_pd,
+    _mm_setzero_pd,
+    _mm_set1_pd,
+    _mm_add_pd,
+    _mm_sub_pd,
+    _mm_mul_pd,
+    _mm_div_pd,
+    _mm_andnot_pd
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f64_simd_executor!(
+    execute_avx_f64_inner,
+    "avx",
+    __m256d,
+    4,
+    _mm256_loadu_pd,
+    _mm256_storeu_pd,
+    _mm256_setzero_pd,
+    _mm256_set1_pd,
+    _mm256_add_pd,
+    _mm256_sub_pd,
+    _mm256_mul_pd,
+    _mm256_div_pd,
+    _mm256_andnot_pd
+);
+
+#[cfg(target_arch = "x86_64")]
+define_f64_simd_executor!(
+    execute_avx512_f64_inner,
+    "avx512f",
+    __m512d,
+    8,
+    _mm512_loadu_pd,
+    _mm512_storeu_pd,
+    _mm512_setzero_pd,
+    _mm512_set1_pd,
+    _mm512_add_pd,
+    _mm512_sub_pd,
+    _mm512_mul_pd,
+    _mm512_div_pd,
+    _mm512_andnot_pd
+);
+
+fn execute_f32<P: GenPoint>(
+    preset: &CompiledPreset,
+    points: &[P],
+    output: &mut [f32],
+    backend: GenBackend,
+) -> Result<(), GenerationError> {
+    match backend {
+        GenBackend::Scalar => {
+            let mut registers =
+                vec![0.0_f32; preset.program.register_count];
+
+            execute_scalar_f32(
+                preset,
+                points,
+                output,
+                0,
+                &mut registers,
+            )
+        }
+
         #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx512f") {
-                return GenBackend::Avx512F;
-            }
+        GenBackend::Sse2 => unsafe {
+            execute_sse2_f32_inner(preset, points, output)
+        },
 
-            if is_x86_feature_detected!("avx2")
-                && is_x86_feature_detected!("fma")
-            {
-                return GenBackend::Avx2Fma;
-            }
-
-            if is_x86_feature_detected!("avx2") {
-                return GenBackend::Avx2;
-            }
-
-            if is_x86_feature_detected!("avx")
-                && is_x86_feature_detected!("fma")
-            {
-                return GenBackend::AvxFma;
-            }
-
-            if is_x86_feature_detected!("avx") {
-                return GenBackend::Avx;
-            }
-
-            if is_x86_feature_detected!("sse2") {
-                return GenBackend::Sse2;
-            }
-        }
-
-        GenBackend::Scalar
-    }
-}
-#[derive(Clone, Debug)]
-pub enum F32GenWorkspace {
-    Scalar(ScalarWorkspace),
-
-    #[cfg(target_arch = "x86_64")]
-    Sse2(Sse2Workspace),
-
-    #[cfg(target_arch = "x86_64")]
-    Avx(AvxWorkspace),
-
-    #[cfg(target_arch = "x86_64")]
-    AvxFma(AvxWorkspace),
-
-    #[cfg(target_arch = "x86_64")]
-    Avx2(Avx2Workspace),
-
-    #[cfg(target_arch = "x86_64")]
-    Avx2Fma(Avx2Workspace),
-
-    #[cfg(target_arch = "x86_64")]
-    Avx512(Avx512Workspace),
-}
-
-impl F32GenWorkspace {
-    pub fn backend(&self) -> GenBackend {
-        match self {
-            Self::Scalar(_) => GenBackend::Scalar,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::Sse2(_) => GenBackend::Sse2,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx(_) => GenBackend::Avx,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::AvxFma(_) => GenBackend::AvxFma,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx2(_) => GenBackend::Avx2,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx2Fma(_) => GenBackend::Avx2Fma,
-
-            #[cfg(target_arch = "x86_64")]
-            Self::Avx512(_) => GenBackend::Avx512F,
-        }
-    }
-    pub fn new(program: &Program) -> F32GenWorkspace {
         #[cfg(target_arch = "x86_64")]
-        {
-            match GenBackend::detected() {
-                GenBackend::Avx512F => {
-                    F32GenWorkspace::Avx512(
-                        unsafe { create_avx512_workspace_inner(program) }
-                    )
-                }
+        GenBackend::Avx => unsafe {
+            execute_avx_f32_inner(preset, points, output)
+        },
 
-                GenBackend::Avx2Fma => {
-                    F32GenWorkspace::Avx2Fma(
-                        unsafe { create_avx2_workspace_inner(program) }
-                    )
-                }
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::AvxFma => unsafe {
+            execute_avx_fma_f32_inner(preset, points, output)
+        },
 
-                GenBackend::Avx2 => {
-                    F32GenWorkspace::Avx2(
-                        unsafe { create_avx2_workspace_inner(program) }
-                    )
-                }
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Avx2 => unsafe {
+            execute_avx2_f32_inner(preset, points, output)
+        },
 
-                GenBackend::AvxFma => {
-                    F32GenWorkspace::AvxFma(
-                        unsafe { create_avx_workspace_inner(program) }
-                    )
-                }
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Avx2Fma => unsafe {
+            execute_avx2_fma_f32_inner(preset, points, output)
+        },
 
-                GenBackend::Avx => {
-                    F32GenWorkspace::Avx(
-                        unsafe { create_avx_workspace_inner(program) }
-                    )
-                }
-
-                GenBackend::Sse2 => {
-                    F32GenWorkspace::Sse2(
-                        unsafe { create_sse2_workspace_inner(program) }
-                    )
-                }
-
-                GenBackend::Scalar => {
-                    F32GenWorkspace::Scalar(ScalarWorkspace::new(program))
-                }
-            }
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            F32GenWorkspace::Scalar(ScalarWorkspace::new(program))
-        }
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Avx512F => unsafe {
+            execute_avx512_f32_inner(preset, points, output)
+        },
     }
-    pub fn execute(
-        &mut self,
-        program: &Program,
-        noises: &[NoiseConfig],
+}
+
+fn execute_f64<P: GenPoint>(
+    preset: &CompiledPreset,
+    points: &[P],
+    output: &mut [f64],
+    backend: GenBackend,
+) -> Result<(), GenerationError> {
+    match backend {
+        GenBackend::Scalar => {
+            let mut registers =
+                vec![0.0_f64; preset.program.register_count];
+
+            execute_scalar_f64(
+                preset,
+                points,
+                output,
+                0,
+                &mut registers,
+            )
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Sse2 => unsafe {
+            execute_sse2_f64_inner(preset, points, output)
+        },
+
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Avx512F => unsafe {
+            execute_avx512_f64_inner(preset, points, output)
+        },
+
+        #[cfg(target_arch = "x86_64")]
+        GenBackend::Avx
+        | GenBackend::AvxFma
+        | GenBackend::Avx2
+        | GenBackend::Avx2Fma => unsafe {
+            execute_avx_f64_inner(preset, points, output)
+        },
+    }
+}
+
+pub trait GenOutput<P: GenPoint>: sealed::Output<P> {
+    fn execute_with_backend(
+        preset: &CompiledPreset,
+        points: &[P],
+        output: &mut [Self],
+        backend: GenBackend,
+    ) -> Result<(), GenerationError>
+    where
+        Self: Sized;
+}
+
+impl sealed::Output<Vec2> for f32 {}
+
+impl GenOutput<Vec2> for f32 {
+    fn execute_with_backend(
+        preset: &CompiledPreset,
         points: &[Vec2],
-        output: &mut [f32]
-    ) {
-        match self {
-            F32GenWorkspace::Scalar(scalar) => {
-                execute_scalar_with_workspace(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    scalar,
-                );
-            }
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::Sse2(ws) => unsafe {
-                execute_sse2_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::Avx(ws) => unsafe {
-                execute_avx1_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::AvxFma(ws) => unsafe {
-                execute_avx1_fma_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::Avx2(ws) => unsafe {
-                execute_avx2_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::Avx2Fma(ws) => unsafe {
-                execute_avx2_fma_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-
-            #[cfg(target_arch = "x86_64")]
-            F32GenWorkspace::Avx512(ws) => unsafe {
-                execute_avx512_inner(
-                    program,
-                    noises,
-                    points,
-                    output,
-                    &mut ws.registers,
-                    &mut ws.scalar,
-                );
-            },
-        }
+        output: &mut [f32],
+        backend: GenBackend,
+    ) -> Result<(), GenerationError> {
+        execute_f32(preset, points, output, backend)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct GenWorkspace {
-    f32: F32GenWorkspace,
-    dvec2_f32: ScalarWorkspace,
-    f64: ScalarWorkspaceF64,
+impl sealed::Output<DVec2> for f32 {}
+
+impl GenOutput<DVec2> for f32 {
+    fn execute_with_backend(
+        preset: &CompiledPreset,
+        points: &[DVec2],
+        output: &mut [f32],
+        backend: GenBackend,
+    ) -> Result<(), GenerationError> {
+        execute_f32(preset, points, output, backend)
+    }
 }
+
+impl sealed::Output<Vec2> for f64 {}
+
+impl GenOutput<Vec2> for f64 {
+    fn execute_with_backend(
+        preset: &CompiledPreset,
+        points: &[Vec2],
+        output: &mut [f64],
+        backend: GenBackend,
+    ) -> Result<(), GenerationError> {
+        execute_f64(preset, points, output, backend)
+    }
+}
+
+impl sealed::Output<DVec2> for f64 {}
+
+impl GenOutput<DVec2> for f64 {
+    fn execute_with_backend(
+        preset: &CompiledPreset,
+        points: &[DVec2],
+        output: &mut [f64],
+        backend: GenBackend,
+    ) -> Result<(), GenerationError> {
+        execute_f64(preset, points, output, backend)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GenWorkspace;
 
 impl GenWorkspace {
-    pub fn new(program: &Program) -> Self {
-        Self {
-            f32: F32GenWorkspace::new(program),
-            dvec2_f32: ScalarWorkspace::new(program),
-            f64: ScalarWorkspaceF64::new(program),
+    pub fn execute<P, O>(
+        preset: &CompiledPreset,
+        points: &[P],
+        output: &mut [O],
+        requested_backend: Option<GenBackend>,
+    ) -> Result<GenBackend, GenerationError>
+    where
+        P: GenPoint,
+        O: GenOutput<P>,
+    {
+        if points.len() != output.len() {
+            return Err(GenerationError::OutputLengthMismatch {
+                points: points.len(),
+                output: output.len(),
+            });
         }
-    }
 
-    pub fn backend(&self) -> GenBackend {
-        self.f32.backend()
-    }
+        validate_program(preset)?;
+        validate_points(points)?;
 
-    pub fn execute_vec2_f32(
-        &mut self,
-        program: &Program,
-        noises: &[NoiseConfig],
-        points: &[Vec2],
-        output: &mut [f32],
-    ) {
-        self.f32.execute(
-            program,
-            noises,
+        let backend = GenBackend::resolve(requested_backend);
+
+        O::execute_with_backend(
+            preset,
             points,
             output,
-        );
-    }
+            backend,
+        )?;
 
-    pub fn execute_vec2_f64(
-        &mut self,
-        program: &Program,
-        noises: &[NoiseConfig],
-        points: &[Vec2],
-        output: &mut [f64],
-    ) -> Option<GenerationError> {
-        execute_f64_with_workspace(
-            program,
-            noises,
-            points,
-            output,
-            &mut self.f64,
-        ).err()
+        Ok(backend)
     }
-
-    pub fn execute_dvec2_f32(
-        &mut self,
-        program: &Program,
-        noises: &[NoiseConfig],
-        points: &[DVec2],
-        output: &mut [f32],
-    ) -> Option<GenerationError> {
-        execute_dvec2_f32_with_workspace(
-            program,
-            noises,
-            points,
-            output,
-            &mut self.dvec2_f32,
-        ).err()
-    }
-
-    pub fn execute_dvec2_f64(
-        &mut self,
-        program: &Program,
-        noises: &[NoiseConfig],
-        points: &[DVec2],
-        output: &mut [f64],
-    ) -> Option<GenerationError> {
-        execute_f64_with_workspace(
-            program,
-            noises,
-            points,
-            output,
-            &mut self.f64,
-        ).err()
+    pub fn execute_muted<P, O>(
+        preset: &CompiledPreset,
+        points: &[P],
+        output: &mut [O],
+        requested_backend: Option<GenBackend>,
+    ) where
+        P: GenPoint,
+        O: GenOutput<P>, {
+        let _ = Self::execute(preset, points, output, requested_backend);
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GenerationError {
-    NonFiniteCoordinate {
-        index: usize,
-    },
-    CoordinateOutOfRange {
-        index: usize,
-    },
+pub fn instruction_count(program: &Program) -> usize {
+    program.instructions.len()
 }
-
-impl std::fmt::Display for GenerationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NonFiniteCoordinate { index } => {
-                write!(f, "Non-finite coordinate at point {index}")
-            }
-
-            Self::CoordinateOutOfRange { index } => {
-                write!(f, "Coordinate exceeds the supported noise lattice range at point {index}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for GenerationError {}
