@@ -44,12 +44,11 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "noisy_skylines"
-version = "0.1.0"
+version = "0.2.2"
 dependencies = [
  "glam",
  "serde",
  "serde_yaml",
- "strum",
  "strum_macros",
 ]
 
@@ -119,12 +118,6 @@ dependencies = [
  "serde",
  "unsafe-libyaml",
 ]
-
-[[package]]
-name = "strum"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 
 [[package]]
 name = "strum_macros"

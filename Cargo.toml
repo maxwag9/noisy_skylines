@@ -1,11 +1,10 @@
 [package]
 name = "noisy_skylines"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2024"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml = "0.9.34"
 glam = "0.34.2"
-strum = "0.28.0"
 strum_macros = "0.28.0"

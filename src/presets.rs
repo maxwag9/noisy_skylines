@@ -21,10 +21,10 @@ impl Default for PresetFile {
             "continents".to_owned(),
             NoiseDefinition {
                 seed: 1741,
-                frequency: 0.0050,
-                octaves: 5,
+                frequency: 0.0015,
+                octaves: 12,
                 lacunarity: 2.0,
-                gain: 0.50,
+                gain: 0.52,
             },
         );
 
@@ -32,9 +32,53 @@ impl Default for PresetFile {
             "mountains".to_owned(),
             NoiseDefinition {
                 seed: 8197,
-                frequency: 0.0180,
-                octaves: 4,
+                frequency: 0.0080,
+                octaves: 10,
                 lacunarity: 2.05,
+                gain: 0.48,
+            },
+        );
+
+        noises.insert(
+            "hills".to_owned(),
+            NoiseDefinition {
+                seed: 4213,
+                frequency: 0.0350,
+                octaves: 8,
+                lacunarity: 2.1,
+                gain: 0.47,
+            },
+        );
+
+        noises.insert(
+            "erosion".to_owned(),
+            NoiseDefinition {
+                seed: 9127,
+                frequency: 0.0120,
+                octaves: 9,
+                lacunarity: 2.0,
+                gain: 0.50,
+            },
+        );
+
+        noises.insert(
+            "detail".to_owned(),
+            NoiseDefinition {
+                seed: 6311,
+                frequency: 0.12,
+                octaves: 7,
+                lacunarity: 2.15,
+                gain: 0.45,
+            },
+        );
+
+        noises.insert(
+            "fine_detail".to_owned(),
+            NoiseDefinition {
+                seed: 2879,
+                frequency: 0.45,
+                octaves: 6,
+                lacunarity: 2.0,
                 gain: 0.48,
             },
         );
@@ -43,13 +87,18 @@ impl Default for PresetFile {
 
         outputs.insert(
             "height".to_owned(),
-            "fbm(continents) * 1.10 + (ridge(fbm(mountains)) - 0.72) * 0.48".to_owned(),
+            "fbm(continents) * 1.10
+        + (ridge(fbm(mountains)) - 0.72) * 0.65
+        + fbm(hills) * 0.18
+        + (fbm(erosion) * ridge(fbm(detail))) * 0.22
+        + fbm(fine_detail) * 0.035"
+                .to_owned(),
         );
 
         Self {
-            name: "Default".to_owned(),
+            name: "Heavy Benchmark".to_owned(),
             noises,
-            outputs
+            outputs,
         }
     }
 }
@@ -1121,4 +1170,337 @@ pub fn fbm_dvec2_f32(
     } else {
         0.0
     })
+}
+
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn fbm_dvec2_f32_avx2(
+    config: &NoiseConfig,
+    points: &[DVec2; 8],
+) -> Option<[f32; 8]> {
+    unsafe {
+        let mut frequency = config.frequency;
+        let lacunarity = config.lacunarity;
+        let gain = config.gain as f32;
+
+        let mut amplitude = 1.0_f32;
+        let mut amplitude_sum = 0.0_f32;
+        let mut value = _mm256_setzero_ps();
+
+        let mut fx_values = [0.0_f32; 8];
+        let mut fz_values = [0.0_f32; 8];
+
+        let mut gx00 = [0.0_f32; 8];
+        let mut gz00 = [0.0_f32; 8];
+        let mut gx10 = [0.0_f32; 8];
+        let mut gz10 = [0.0_f32; 8];
+        let mut gx01 = [0.0_f32; 8];
+        let mut gz01 = [0.0_f32; 8];
+        let mut gx11 = [0.0_f32; 8];
+        let mut gz11 = [0.0_f32; 8];
+
+        for octave in 0..config.octaves {
+            let seed = config.seed.wrapping_add(
+                (octave as i32).wrapping_mul(1013),
+            );
+
+            for lane in 0..8 {
+                let x = points[lane].x * frequency;
+                let z = points[lane].y * frequency;
+
+                let (ix, fx64) = split_cell(x)?;
+                let (iz, fz64) = split_cell(z)?;
+
+                let fx = fx64 as f32;
+                let fz = fz64 as f32;
+
+                fx_values[lane] = fx;
+                fz_values[lane] = fz;
+
+                let i00 = (hash2_i64(ix, iz, seed) & 7) as usize;
+                let i10 = (hash2_i64(ix.wrapping_add(1), iz, seed) & 7) as usize;
+                let i01 = (hash2_i64(ix, iz.wrapping_add(1), seed) & 7) as usize;
+                let i11 = (hash2_i64(ix.wrapping_add(1), iz.wrapping_add(1), seed) & 7) as usize;
+
+                gx00[lane] = GRADIENT_X[i00];
+                gz00[lane] = GRADIENT_Z[i00];
+
+                gx10[lane] = GRADIENT_X[i10];
+                gz10[lane] = GRADIENT_Z[i10];
+
+                gx01[lane] = GRADIENT_X[i01];
+                gz01[lane] = GRADIENT_Z[i01];
+
+                gx11[lane] = GRADIENT_X[i11];
+                gz11[lane] = GRADIENT_Z[i11];
+            }
+
+            let fx = _mm256_loadu_ps(fx_values.as_ptr());
+            let fz = _mm256_loadu_ps(fz_values.as_ptr());
+
+            let one = _mm256_set1_ps(1.0);
+
+            let dx0 = fx;
+            let dz0 = fz;
+            let dx1 = _mm256_sub_ps(fx, one);
+            let dz1 = _mm256_sub_ps(fz, one);
+
+            let n00 = _mm256_add_ps(
+                _mm256_mul_ps(_mm256_loadu_ps(gx00.as_ptr()), dx0),
+                _mm256_mul_ps(_mm256_loadu_ps(gz00.as_ptr()), dz0),
+            );
+
+            let n10 = _mm256_add_ps(
+                _mm256_mul_ps(_mm256_loadu_ps(gx10.as_ptr()), dx1),
+                _mm256_mul_ps(_mm256_loadu_ps(gz10.as_ptr()), dz0),
+            );
+
+            let n01 = _mm256_add_ps(
+                _mm256_mul_ps(_mm256_loadu_ps(gx01.as_ptr()), dx0),
+                _mm256_mul_ps(_mm256_loadu_ps(gz01.as_ptr()), dz1),
+            );
+
+            let n11 = _mm256_add_ps(
+                _mm256_mul_ps(_mm256_loadu_ps(gx11.as_ptr()), dx1),
+                _mm256_mul_ps(_mm256_loadu_ps(gz11.as_ptr()), dz1),
+            );
+
+            let u = fade_avx2(fx);
+            let v = fade_avx2(fz);
+
+            let lower = lerp_avx2(n00, n10, u);
+            let upper = lerp_avx2(n01, n11, u);
+
+            let noise = _mm256_mul_ps(
+                lerp_avx2(lower, upper, v),
+                _mm256_set1_ps(NOISE_SCALE),
+            );
+
+            value = _mm256_add_ps(
+                value,
+                _mm256_mul_ps(noise, _mm256_set1_ps(amplitude)),
+            );
+
+            amplitude_sum += amplitude;
+            frequency *= lacunarity;
+            amplitude *= gain;
+        }
+
+        if amplitude_sum > 0.0 {
+            value = _mm256_div_ps(value, _mm256_set1_ps(amplitude_sum));
+        }
+
+        let mut result = [0.0_f32; 8];
+        _mm256_storeu_ps(result.as_mut_ptr(), value);
+
+        Some(result)
+    }
+}
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn noise2d_cells_avx2_fma(
+    ix: __m256i,
+    iz: __m256i,
+    fx: __m256,
+    fz: __m256,
+    seed: i32,
+) -> __m256 {
+    unsafe {
+        let one = _mm256_set1_ps(1.0);
+        let one_i = _mm256_set1_epi32(1);
+
+        let ix1 = _mm256_add_epi32(ix, one_i);
+        let iz1 = _mm256_add_epi32(iz, one_i);
+
+        let n00 = gradient_dot_avx2_fma(ix, iz, fx, fz, seed);
+
+        let n10 = gradient_dot_avx2_fma(
+            ix1,
+            iz,
+            _mm256_sub_ps(fx, one),
+            fz,
+            seed,
+        );
+
+        let n01 = gradient_dot_avx2_fma(
+            ix,
+            iz1,
+            fx,
+            _mm256_sub_ps(fz, one),
+            seed,
+        );
+
+        let n11 = gradient_dot_avx2_fma(
+            ix1,
+            iz1,
+            _mm256_sub_ps(fx, one),
+            _mm256_sub_ps(fz, one),
+            seed,
+        );
+
+        let u = fade_avx2_fma(fx);
+        let v = fade_avx2_fma(fz);
+
+        let lower = lerp_avx2_fma(n00, n10, u);
+        let upper = lerp_avx2_fma(n01, n11, u);
+
+        _mm256_mul_ps(
+            lerp_avx2_fma(lower, upper, v),
+            _mm256_set1_ps(NOISE_SCALE),
+        )
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn fbm_dvec2_f32_avx2_fma(
+    config: &NoiseConfig,
+    points: &[DVec2; 8],
+) -> Option<[f32; 8]> {
+    unsafe {
+        let mut x_coordinates = [0.0_f64; 8];
+        let mut z_coordinates = [0.0_f64; 8];
+
+        for lane in 0..8 {
+            x_coordinates[lane] = points[lane].x;
+            z_coordinates[lane] = points[lane].y;
+        }
+
+        let x_low = _mm256_loadu_pd(x_coordinates.as_ptr());
+        let x_high = _mm256_loadu_pd(x_coordinates.as_ptr().add(4));
+
+        let z_low = _mm256_loadu_pd(z_coordinates.as_ptr());
+        let z_high = _mm256_loadu_pd(z_coordinates.as_ptr().add(4));
+
+        let minimum_cell = _mm256_set1_pd(i32::MIN as f64);
+        let maximum_cell = _mm256_set1_pd(i32::MAX as f64);
+
+        let mut frequency = config.frequency;
+        let gain = config.gain as f32;
+
+        let mut amplitude = 1.0_f32;
+        let mut amplitude_sum = 0.0_f32;
+
+        let mut value = _mm256_setzero_ps();
+
+        for octave in 0..config.octaves {
+            let frequency_pd = _mm256_set1_pd(frequency);
+
+            let scaled_x_low = _mm256_mul_pd(x_low, frequency_pd);
+            let scaled_x_high = _mm256_mul_pd(x_high, frequency_pd);
+
+            let scaled_z_low = _mm256_mul_pd(z_low, frequency_pd);
+            let scaled_z_high = _mm256_mul_pd(z_high, frequency_pd);
+
+            let floor_x_low = _mm256_floor_pd(scaled_x_low);
+            let floor_x_high = _mm256_floor_pd(scaled_x_high);
+
+            let floor_z_low = _mm256_floor_pd(scaled_z_low);
+            let floor_z_high = _mm256_floor_pd(scaled_z_high);
+
+            let valid_x_low = _mm256_and_pd(
+                _mm256_cmp_pd::<_CMP_GE_OQ>(floor_x_low, minimum_cell),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(floor_x_low, maximum_cell),
+            );
+
+            let valid_x_high = _mm256_and_pd(
+                _mm256_cmp_pd::<_CMP_GE_OQ>(floor_x_high, minimum_cell),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(floor_x_high, maximum_cell),
+            );
+
+            let valid_z_low = _mm256_and_pd(
+                _mm256_cmp_pd::<_CMP_GE_OQ>(floor_z_low, minimum_cell),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(floor_z_low, maximum_cell),
+            );
+
+            let valid_z_high = _mm256_and_pd(
+                _mm256_cmp_pd::<_CMP_GE_OQ>(floor_z_high, minimum_cell),
+                _mm256_cmp_pd::<_CMP_LT_OQ>(floor_z_high, maximum_cell),
+            );
+
+            if _mm256_movemask_pd(_mm256_and_pd(valid_x_low, valid_z_low)) != 0xF
+                || _mm256_movemask_pd(_mm256_and_pd(valid_x_high, valid_z_high)) != 0xF
+            {
+                return None;
+            }
+
+            let ix_low = _mm256_cvttpd_epi32(floor_x_low);
+            let ix_high = _mm256_cvttpd_epi32(floor_x_high);
+
+            let iz_low = _mm256_cvttpd_epi32(floor_z_low);
+            let iz_high = _mm256_cvttpd_epi32(floor_z_high);
+
+            let ix = _mm256_insertf128_si256::<1>(
+                _mm256_castsi128_si256(ix_low),
+                ix_high,
+            );
+
+            let iz = _mm256_insertf128_si256::<1>(
+                _mm256_castsi128_si256(iz_low),
+                iz_high,
+            );
+
+            let fx_low = _mm256_cvtpd_ps(
+                _mm256_sub_pd(scaled_x_low, floor_x_low),
+            );
+
+            let fx_high = _mm256_cvtpd_ps(
+                _mm256_sub_pd(scaled_x_high, floor_x_high),
+            );
+
+            let fz_low = _mm256_cvtpd_ps(
+                _mm256_sub_pd(scaled_z_low, floor_z_low),
+            );
+
+            let fz_high = _mm256_cvtpd_ps(
+                _mm256_sub_pd(scaled_z_high, floor_z_high),
+            );
+
+            let fx = _mm256_insertf128_ps::<1>(
+                _mm256_castps128_ps256(fx_low),
+                fx_high,
+            );
+
+            let fz = _mm256_insertf128_ps::<1>(
+                _mm256_castps128_ps256(fz_low),
+                fz_high,
+            );
+
+            let seed = config.seed.wrapping_add(
+                (octave as i32).wrapping_mul(1013),
+            );
+
+            let noise = noise2d_cells_avx2_fma(
+                ix,
+                iz,
+                fx,
+                fz,
+                seed,
+            );
+
+            value = _mm256_fmadd_ps(
+                noise,
+                _mm256_set1_ps(amplitude),
+                value,
+            );
+
+            amplitude_sum += amplitude;
+            frequency *= config.lacunarity;
+            amplitude *= gain;
+        }
+
+        if amplitude_sum > 0.0 {
+            value = _mm256_div_ps(
+                value,
+                _mm256_set1_ps(amplitude_sum),
+            );
+        }
+
+        let mut result = [0.0_f32; 8];
+
+        _mm256_storeu_ps(result.as_mut_ptr(), value);
+
+        Some(result)
+    }
 }

@@ -1,10 +1,10 @@
+use glam::{DVec2, Vec2};
+use noisy_skylines::compiler::{GenBackend, GenWorkspace, compile_expression, instruction_count};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
-use glam::{DVec2, Vec2};
-use noisy_skylines::compiler::{compile_expression, instruction_count, GenBackend, GenWorkspace};
 
-use noisy_skylines::presets::{compile_preset, noise2d, fbm_scalar, CompiledPreset, NoiseConfig, fbm_dvec2_f32};
+use noisy_skylines::presets::{CompiledPreset, NoiseConfig, compile_preset, fbm_dvec2_f32, fbm_scalar, noise2d};
 
 fn continental_preset() -> CompiledPreset {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -207,10 +207,10 @@ fn all_precision_combinations_execute() {
     let mut output32 = vec![0.0_f32; 3];
     let mut output64 = vec![0.0_f64; 3];
 
-    GenWorkspace::execute_muted(&preset, points32.as_slice(), output32.as_mut_slice(), Some(GenBackend::Scalar));
-    GenWorkspace::execute_muted(&preset, points32.as_slice(), output64.as_mut_slice(), Some(GenBackend::Scalar));
-    GenWorkspace::execute_muted(&preset, points64.as_slice(), output32.as_mut_slice(), Some(GenBackend::Scalar));
-    GenWorkspace::execute_muted(&preset, points64.as_slice(), output64.as_mut_slice(), Some(GenBackend::Scalar));
+    output32.append(&mut GenWorkspace::execute_muted(&preset, points32.as_slice(), Some(GenBackend::Scalar)));
+    output64.append(&mut GenWorkspace::execute_muted(&preset, points32.as_slice(), Some(GenBackend::Scalar)));
+    output32.append(&mut GenWorkspace::execute_muted(&preset, points64.as_slice(), Some(GenBackend::Scalar)));
+    output64.append(&mut GenWorkspace::execute_muted(&preset, points64.as_slice(), Some(GenBackend::Scalar)));
 
     assert!(output32.iter().all(|v| v.is_finite()));
     assert!(output64.iter().all(|v| v.is_finite()));
@@ -252,8 +252,7 @@ fn continental_terrain_is_finite_and_non_flat() {
     }
 
     let mut output = vec![0.0f32; count];
-
-    GenWorkspace::execute_muted(&preset, points.as_slice(), output.as_mut_slice(), Some(GenBackend::Scalar));
+    output.append(&mut GenWorkspace::execute_muted(&preset, points.as_slice(), Some(GenBackend::Scalar)));
 
     assert!(output.iter().all(|v| v.is_finite()));
 
@@ -271,7 +270,7 @@ fn continental_terrain_is_finite_and_non_flat() {
 #[test]
 #[ignore = "Manual performance benchmark. Run with cargo test --release -- --ignored --nocapture"]
 fn benchmark_continental_generation() {
-    let preset = continental_preset();
+    let preset = CompiledPreset::default();
 
     let side = 256;
     let count = side * side;
@@ -285,7 +284,7 @@ fn benchmark_continental_generation() {
     let scalar_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), scalar_output.as_mut_slice(), Some(GenBackend::Scalar));
+        scalar_output.append(&mut GenWorkspace::execute_muted(&preset, points.as_slice(), Some(GenBackend::Scalar)));
     }
 
     let scalar_elapsed = scalar_start.elapsed();
@@ -293,7 +292,7 @@ fn benchmark_continental_generation() {
     let automatic_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), automatic_output.as_mut_slice(), None);
+        automatic_output.append(&mut GenWorkspace::execute_muted(&preset, points.as_slice(), None));
     }
 
     let automatic_elapsed = automatic_start.elapsed();
@@ -335,7 +334,7 @@ fn benchmark_continental_generation() {
 #[test]
 #[ignore = "Manual performance benchmark. Run with cargo test --release -- --ignored --nocapture"]
 fn benchmark_continental_generation_f64() {
-    let preset = continental_preset();
+    let preset = CompiledPreset::default();
 
     let side = 256;
     let count = side * side;
@@ -349,7 +348,7 @@ fn benchmark_continental_generation_f64() {
     let f32_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), f32_output.as_mut_slice(), None);
+        f32_output.append(&mut GenWorkspace::execute_muted(&preset, points.as_slice(), None));
     }
 
     let f32_elapsed = f32_start.elapsed();
@@ -357,7 +356,7 @@ fn benchmark_continental_generation_f64() {
     let f64_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), f64_output.as_mut_slice(), None);
+        f64_output.append(&mut GenWorkspace::execute_muted(&preset, points.as_slice(), None));
     }
 
     let f64_elapsed = f64_start.elapsed();
@@ -378,8 +377,8 @@ fn benchmark_continental_generation_f64() {
     let f64_rate =
         total_samples / f64_elapsed.as_secs_f64() / 1_000_000.0;
 
-    let speedup = f32_elapsed.as_secs_f64()
-        / f64_elapsed.as_secs_f64();
+    let speedup = f64_elapsed.as_secs_f64()
+        / f32_elapsed.as_secs_f64();
 
     println!();
     println!("========== NOISY SKYLINES BENCHMARK - Vec2 (f32) into F32 vs F64 automatic ==========");
@@ -393,11 +392,10 @@ fn benchmark_continental_generation_f64() {
     println!("Speedup:             {speedup:.2}x");
     println!("==============================================");
 }
-
 #[test]
 #[ignore = "Manual performance benchmark. Run with cargo test --release -- --ignored --nocapture"]
 fn benchmark_continental_generation_f64_dvec() {
-    let preset = continental_preset();
+    let preset = CompiledPreset::default();
 
     let side = 256;
     let count = side * side;
@@ -411,7 +409,7 @@ fn benchmark_continental_generation_f64_dvec() {
     let f32_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), f32_output.as_mut_slice(), None);
+        f32_output.append(&mut GenWorkspace::execute_muted::<_, f32>(&preset, points.as_slice(), None));
     }
 
     let f32_elapsed = f32_start.elapsed();
@@ -419,7 +417,7 @@ fn benchmark_continental_generation_f64_dvec() {
     let f64_start = Instant::now();
 
     for _ in 0..iterations {
-        GenWorkspace::execute_muted(&preset, points.as_slice(), f64_output.as_mut_slice(), None);
+        f64_output.append(&mut GenWorkspace::execute_muted::<_, f64>(&preset, points.as_slice(), None));
     }
 
     let f64_elapsed = f64_start.elapsed();
@@ -440,8 +438,8 @@ fn benchmark_continental_generation_f64_dvec() {
     let f64_rate =
         total_samples / f64_elapsed.as_secs_f64() / 1_000_000.0;
 
-    let speedup = f32_elapsed.as_secs_f64()
-        / f64_elapsed.as_secs_f64();
+    let speedup = f64_elapsed.as_secs_f64()
+        / f32_elapsed.as_secs_f64();
 
     println!();
     println!("========== NOISY SKYLINES BENCHMARK - DVec2 (f64) into F32 vs F64 automatic ==========");
