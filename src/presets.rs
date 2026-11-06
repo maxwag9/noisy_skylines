@@ -21,10 +21,10 @@ impl Default for PresetFile {
             "continents".to_owned(),
             NoiseDefinition {
                 seed: 1741,
-                frequency: 0.0015,
-                octaves: 12,
+                frequency: 0.0050,
+                octaves: 5,
                 lacunarity: 2.0,
-                gain: 0.52,
+                gain: 0.50,
             },
         );
 
@@ -32,53 +32,9 @@ impl Default for PresetFile {
             "mountains".to_owned(),
             NoiseDefinition {
                 seed: 8197,
-                frequency: 0.0080,
-                octaves: 10,
+                frequency: 0.0180,
+                octaves: 4,
                 lacunarity: 2.05,
-                gain: 0.48,
-            },
-        );
-
-        noises.insert(
-            "hills".to_owned(),
-            NoiseDefinition {
-                seed: 4213,
-                frequency: 0.0350,
-                octaves: 8,
-                lacunarity: 2.1,
-                gain: 0.47,
-            },
-        );
-
-        noises.insert(
-            "erosion".to_owned(),
-            NoiseDefinition {
-                seed: 9127,
-                frequency: 0.0120,
-                octaves: 9,
-                lacunarity: 2.0,
-                gain: 0.50,
-            },
-        );
-
-        noises.insert(
-            "detail".to_owned(),
-            NoiseDefinition {
-                seed: 6311,
-                frequency: 0.12,
-                octaves: 7,
-                lacunarity: 2.15,
-                gain: 0.45,
-            },
-        );
-
-        noises.insert(
-            "fine_detail".to_owned(),
-            NoiseDefinition {
-                seed: 2879,
-                frequency: 0.45,
-                octaves: 6,
-                lacunarity: 2.0,
                 gain: 0.48,
             },
         );
@@ -87,18 +43,13 @@ impl Default for PresetFile {
 
         outputs.insert(
             "height".to_owned(),
-            "fbm(continents) * 1.10
-        + (ridge(fbm(mountains)) - 0.72) * 0.65
-        + fbm(hills) * 0.18
-        + (fbm(erosion) * ridge(fbm(detail))) * 0.22
-        + fbm(fine_detail) * 0.035"
-                .to_owned(),
+            "fbm(continents) * 1.10 + (ridge(fbm(mountains)) - 0.72) * 0.48".to_owned(),
         );
 
         Self {
-            name: "Heavy Benchmark".to_owned(),
+            name: "Default".to_owned(),
             noises,
-            outputs,
+            outputs
         }
     }
 }
